@@ -142,7 +142,7 @@ pub async fn check_username(
         let rtx = result_tx.clone();
 
         tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
+            let _permit = sem.acquire().await.expect("Semaphore closed unexpectedly");
             let result = check_site_with_retry(&name, &site, &username, &c, &cnr).await;
             let _ = rtx.send(result).await;
         });
@@ -191,7 +191,15 @@ async fn check_site_with_retry(
     }
 
     // All retries exhausted — clean context for display
-    let mut final_result = last.unwrap();
+    let mut final_result = last.unwrap_or_else(|| QueryResult {
+        username: username.to_string(),
+        site_name: name.to_string(),
+        url_main: site.url_main.clone(),
+        site_url: site.url.replace("{}", username),
+        status: QueryStatus::Unknown,
+        response_time_ms: None,
+        context: Some("All retries exhausted with no result".into()),
+    });
     if let Some(ctx) = final_result.context.as_mut() {
         if let Some(stripped) = ctx.strip_prefix("NET: ") {
             *ctx = format!("{} (after {} retries)", stripped, MAX_ATTEMPTS - 1);
