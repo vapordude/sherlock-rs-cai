@@ -1,11 +1,11 @@
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 const DATA_URL: &str = "https://raw.githubusercontent.com/sherlock-project/sherlock/master/sherlock_project/resources/data.json";
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum ErrorMsg {
     Single(String),
@@ -21,7 +21,7 @@ impl ErrorMsg {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 #[serde(untagged)]
 pub enum ErrorCode {
     Single(u16),
@@ -37,7 +37,7 @@ impl ErrorCode {
     }
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SiteData {
     #[serde(rename = "errorMsg")]
     pub error_msg: Option<ErrorMsg>,
@@ -87,8 +87,23 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
         .build()?;
 
     let json = client.get(DATA_URL).send().await?.text().await?;
-    tokio::fs::write(dir.join("data.json"), &json).await?;
-    parse_sites(&json)
+    let mut sites = parse_sites(&json)?;
+
+    // Add custom sites
+    let custom_json = include_str!("custom_sites.json");
+    if let Ok(custom_sites) = parse_sites(custom_json) {
+        for (k, mut v) in custom_sites {
+            v.is_nsfw = Some(true); // default to true since these look like NSFW sites
+            sites.insert(k, v);
+        }
+    }
+
+    // Convert back to string and save
+    if let Ok(merged_json) = serde_json::to_string(&sites) {
+        tokio::fs::write(dir.join("data.json"), &merged_json).await?;
+    }
+
+    Ok(sites)
 }
 
 fn parse_sites(json: &str) -> Result<HashMap<String, SiteData>> {
