@@ -93,10 +93,19 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
 
 fn parse_sites(json: &str) -> Result<HashMap<String, SiteData>> {
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(json)?;
-    let sites = raw
+    let mut sites: HashMap<String, SiteData> = raw
         .into_iter()
         .filter(|(k, _)| k != "$schema")
         .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
         .collect();
+
+    if let Ok(custom_raw) = serde_json::from_str::<HashMap<String, serde_json::Value>>(crate::custom_sites::CUSTOM_SITES_JSON) {
+        for (k, v) in custom_raw {
+            if let Ok(site) = serde_json::from_value(v) {
+                sites.insert(k, site);
+            }
+        }
+    }
+
     Ok(sites)
 }

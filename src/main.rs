@@ -1,6 +1,7 @@
 mod checker;
 mod export;
 mod result;
+mod custom_sites;
 mod server;
 mod sites;
 
