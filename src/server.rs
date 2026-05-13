@@ -19,7 +19,6 @@ const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 
 pub struct AppState {
     pub sites: RwLock<Option<HashMap<String, SiteData>>>,
-    pub last_results: RwLock<Vec<QueryResult>>,
     pub load_error: RwLock<Option<String>>,
 }
 
@@ -27,7 +26,6 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             sites: RwLock::new(None),
-            last_results: RwLock::new(Vec::new()),
             load_error: RwLock::new(None),
         }
     }
@@ -38,8 +36,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/api/status", get(status_handler))
         .route("/api/search", get(search_handler))
-        .route("/api/export/csv", get(export_csv_handler))
-        .route("/api/export/txt", get(export_txt_handler))
+        .route("/api/export/csv", post(export_csv_handler))
+        .route("/api/export/txt", post(export_txt_handler))
         .route("/api/update-db", post(update_db_handler))
         .with_state(state)
 }
@@ -121,9 +119,6 @@ async fn search_handler(
     let timeout_secs = params.timeout.unwrap_or(30);
     let proxy = params.proxy.clone();
 
-    // Clear previous results
-    state.last_results.write().await.clear();
-
     tokio::spawn(async move {
         for username in &usernames {
             // ── username_start ────────────────────────────────────────────────
@@ -144,8 +139,7 @@ async fn search_handler(
             }
 
             // ── Run checker ───────────────────────────────────────────────────
-            let (checker_tx, mut checker_rx) =
-                tokio::sync::mpsc::channel::<QueryResult>(300);
+            let (checker_tx, mut checker_rx) = tokio::sync::mpsc::channel::<QueryResult>(300);
 
             let sites_clone = sites.clone();
             let uname = username.clone();
@@ -179,8 +173,6 @@ async fn search_handler(
                     total,
                 };
 
-                state.last_results.write().await.push(result);
-
                 let json = serde_json::to_string(&event_data).unwrap_or_default();
                 if sse_tx
                     .send(Ok(Event::default().event("result").data(json)))
@@ -200,9 +192,7 @@ async fn search_handler(
             .unwrap_or_default();
 
             if sse_tx
-                .send(Ok(Event::default()
-                    .event("username_done")
-                    .data(done_json)))
+                .send(Ok(Event::default().event("username_done").data(done_json)))
                 .await
                 .is_err()
             {
@@ -211,18 +201,9 @@ async fn search_handler(
         }
 
         // ── Overall done ──────────────────────────────────────────────────────
-        let total_found = state
-            .last_results
-            .read()
-            .await
-            .iter()
-            .filter(|r| r.status == QueryStatus::Claimed)
-            .count();
-
         let _ = sse_tx
             .send(Ok(Event::default().event("done").data(
                 serde_json::to_string(&serde_json::json!({
-                    "total_found": total_found,
                     "total_usernames": usernames.len(),
                 }))
                 .unwrap_or_default(),
@@ -233,8 +214,8 @@ async fn search_handler(
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())
 }
 
-async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+#[axum_macros::debug_handler]
+async fn export_csv_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let csv_data = export::to_csv(&results);
     (
         [
@@ -248,8 +229,8 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 }
 
-async fn export_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+#[axum_macros::debug_handler]
+async fn export_txt_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let txt_data = export::to_txt(&results);
     (
         [

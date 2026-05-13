@@ -19,6 +19,7 @@ csv = "1"
 tokio-stream = "0.1"
 anyhow = "1"
 rand = "0.8"
+axum-macros = "0.5.1"
 
 [profile.release]
 opt-level = 3

@@ -777,8 +777,45 @@ function showToast(msg) {
   setTimeout(() => t.remove(), 2100);
 }
 
-function exportCsv() { window.location.href = '/api/export/csv'; }
-function exportTxt()  { window.location.href = '/api/export/txt'; }
+async function exportData(url, filename) {
+  if (!tabState) return;
+
+  // Aggregate all results
+  const allResults = [];
+  for (const username of Object.keys(tabState)) {
+    allResults.push(...tabState[username].results);
+  }
+
+  if (allResults.length === 0) {
+    showToast("No results to export");
+    return;
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(allResults)
+    });
+
+    if (!res.ok) throw new Error('Export failed');
+
+    const blob = await res.blob();
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = downloadUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+  } catch (e) {
+    showToast(e.message);
+  }
+}
+
+function exportCsv() { exportData('/api/export/csv', 'sherlock_results.csv'); }
+function exportTxt() { exportData('/api/export/txt', 'sherlock_results.txt'); }
 
 async function updateDb() {
   const btn = document.getElementById('updateBtn');
