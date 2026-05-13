@@ -85,44 +85,28 @@ struct SseResultData {
     total: usize,
 }
 
-async fn search_handler(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<SearchParams>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(500);
+struct SearchTaskArgs {
+    usernames: Vec<String>,
+    sites: std::collections::HashMap<String, SiteData>,
+    total: usize,
+    timeout_secs: u64,
+    proxy: Option<String>,
+    include_nsfw: bool,
+    sse_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: Arc<AppState>,
+}
 
-    // Parse and deduplicate usernames
-    let usernames: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        params
-            .usernames
-            .split(|c: char| c == ',' || c == '\n' || c == ';')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && seen.insert(s.clone()))
-            .take(10)
-            .collect()
-    };
-
-    if usernames.is_empty() {
-        let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
-        return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
-    }
-
-    let sites_guard = state.sites.read().await;
-    let sites = sites_guard.clone().unwrap_or_default();
-    drop(sites_guard);
-
-    let include_nsfw = params.nsfw.unwrap_or(false);
-    let total: usize = sites
-        .values()
-        .filter(|s| include_nsfw || !s.is_nsfw.unwrap_or(false))
-        .count();
-
-    let timeout_secs = params.timeout.unwrap_or(30);
-    let proxy = params.proxy.clone();
-
-    // Clear previous results
-    state.last_results.write().await.clear();
+fn spawn_search_task(args: SearchTaskArgs) {
+    let SearchTaskArgs {
+        usernames,
+        sites,
+        total,
+        timeout_secs,
+        proxy,
+        include_nsfw,
+        sse_tx,
+        state,
+    } = args;
 
     tokio::spawn(async move {
         for username in &usernames {
@@ -144,8 +128,7 @@ async fn search_handler(
             }
 
             // ── Run checker ───────────────────────────────────────────────────
-            let (checker_tx, mut checker_rx) =
-                tokio::sync::mpsc::channel::<QueryResult>(300);
+            let (checker_tx, mut checker_rx) = tokio::sync::mpsc::channel::<QueryResult>(300);
 
             let sites_clone = sites.clone();
             let uname = username.clone();
@@ -200,9 +183,7 @@ async fn search_handler(
             .unwrap_or_default();
 
             if sse_tx
-                .send(Ok(Event::default()
-                    .event("username_done")
-                    .data(done_json)))
+                .send(Ok(Event::default().event("username_done").data(done_json)))
                 .await
                 .is_err()
             {
@@ -228,6 +209,57 @@ async fn search_handler(
                 .unwrap_or_default(),
             )))
             .await;
+    });
+}
+
+fn parse_usernames(usernames: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    usernames
+        .split([',', '\n', ';'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .take(10)
+        .collect()
+}
+
+async fn search_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SearchParams>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(500);
+
+    let usernames = parse_usernames(&params.usernames);
+
+    if usernames.is_empty() {
+        let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+        return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+    }
+
+    let sites_guard = state.sites.read().await;
+    let sites = sites_guard.clone().unwrap_or_default();
+    drop(sites_guard);
+
+    let include_nsfw = params.nsfw.unwrap_or(false);
+    let total: usize = sites
+        .values()
+        .filter(|s| include_nsfw || !s.is_nsfw.unwrap_or(false))
+        .count();
+
+    let timeout_secs = params.timeout.unwrap_or(30);
+    let proxy = params.proxy.clone();
+
+    // Clear previous results
+    state.last_results.write().await.clear();
+
+    spawn_search_task(SearchTaskArgs {
+        usernames,
+        sites,
+        total,
+        timeout_secs,
+        proxy,
+        include_nsfw,
+        sse_tx,
+        state: state.clone(),
     });
 
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())

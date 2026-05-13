@@ -10,7 +10,9 @@ pub fn to_csv(results: &[QueryResult]) -> String {
             &r.site_name,
             &r.site_url,
             r.status.as_str(),
-            &r.response_time_ms.map(|t| t.to_string()).unwrap_or_default(),
+            &r.response_time_ms
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
         ]);
     }
     String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
