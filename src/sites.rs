@@ -1,4 +1,5 @@
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,6 +62,8 @@ pub struct SiteData {
     pub headers: Option<HashMap<String, String>>,
     pub request_method: Option<String>,
     pub request_payload: Option<serde_json::Value>,
+    #[serde(skip)]
+    pub compiled_regex: Option<Regex>,
 }
 
 fn data_dir() -> PathBuf {
@@ -108,10 +111,16 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
 
 fn parse_sites(json: &str) -> Result<HashMap<String, SiteData>> {
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(json)?;
-    let sites = raw
+    let mut sites: HashMap<String, SiteData> = raw
         .into_iter()
         .filter(|(k, _)| k != "$schema")
         .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
         .collect();
+
+    for (_, site) in sites.iter_mut() {
+        if let Some(regex_str) = &site.regex_check {
+            site.compiled_regex = Regex::new(regex_str).ok();
+        }
+    }
     Ok(sites)
 }
