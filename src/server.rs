@@ -18,7 +18,7 @@ use tokio_stream::wrappers::ReceiverStream;
 const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 
 pub struct AppState {
-    pub sites: RwLock<Option<HashMap<String, SiteData>>>,
+    pub sites: RwLock<Option<Arc<HashMap<String, SiteData>>>>,
     pub last_results: RwLock<Vec<QueryResult>>,
     pub load_error: RwLock<Option<String>>,
 }
@@ -274,7 +274,7 @@ async fn update_db_handler(State(state): State<Arc<AppState>>) -> Json<UpdateRes
     match sites::download_sites().await {
         Ok(new_sites) => {
             let count = new_sites.len();
-            *state.sites.write().await = Some(new_sites);
+            *state.sites.write().await = Some(Arc::new(new_sites));
             *state.load_error.write().await = None;
             Json(UpdateResponse {
                 success: true,
