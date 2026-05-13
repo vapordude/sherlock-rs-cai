@@ -17,6 +17,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 
+/// Shared application state orchestrating in-memory caching and export contexts across Axum handlers.
 pub struct AppState {
     pub sites: RwLock<Option<HashMap<String, SiteData>>>,
     pub last_results: RwLock<Vec<QueryResult>>,
@@ -24,6 +25,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Initializes a new empty state, locking until the asynchronous target definition parsing finishes.
     pub fn new() -> Self {
         Self {
             sites: RwLock::new(None),
@@ -33,6 +35,7 @@ impl AppState {
     }
 }
 
+/// Configures and yields the application's root Axum router binding core application endpoints to underlying handlers.
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index_handler))
@@ -44,6 +47,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
+/// Renders the primary application user interface dynamically injected at compile-time.
 async fn index_handler() -> Html<&'static str> {
     Html(FRONTEND_HTML)
 }
@@ -55,6 +59,7 @@ struct StatusResponse {
     error: Option<String>,
 }
 
+/// Retrieves the target initialization state of the underlying backend instance.
 async fn status_handler(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let sites = state.sites.read().await;
     let error = state.load_error.read().await;
@@ -85,6 +90,7 @@ struct SseResultData {
     total: usize,
 }
 
+/// Executes a live scan spanning active sites streaming SSE events conveying result resolutions locally.
 async fn search_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
@@ -233,6 +239,7 @@ async fn search_handler(
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())
 }
 
+/// Formats a complete scan dataset originating from the cache into CSV.
 async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let results = state.last_results.read().await;
     let csv_data = export::to_csv(&results);
@@ -248,6 +255,7 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 }
 
+/// Formats a complete scan dataset originating from the cache into standard TXT.
 async fn export_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let results = state.last_results.read().await;
     let txt_data = export::to_txt(&results);
@@ -270,6 +278,7 @@ struct UpdateResponse {
     error: Option<String>,
 }
 
+/// Restarts the target definition parser forcing a hard download replacing all in-memory structures locally.
 async fn update_db_handler(State(state): State<Arc<AppState>>) -> Json<UpdateResponse> {
     match sites::download_sites().await {
         Ok(new_sites) => {
