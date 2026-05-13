@@ -96,7 +96,7 @@ async fn search_handler(
         let mut seen = std::collections::HashSet::new();
         params
             .usernames
-            .split(|c: char| c == ',' || c == '\n' || c == ';')
+            .split(|c: char| [',', '\n', ';'].contains(&c))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty() && seen.insert(s.clone()))
             .take(10)

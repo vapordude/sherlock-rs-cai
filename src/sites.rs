@@ -63,6 +63,12 @@ pub struct SiteData {
     pub request_payload: Option<serde_json::Value>,
 }
 
+impl SiteData {
+    pub fn format_url(&self, username: &str) -> String {
+        self.url.replace("{}", username)
+    }
+}
+
 fn data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
