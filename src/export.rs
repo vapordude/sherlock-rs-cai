@@ -1,5 +1,5 @@
 use crate::result::{QueryResult, QueryStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub fn to_csv(results: &[QueryResult]) -> String {
     let mut wtr = csv::Writer::from_writer(vec![]);
@@ -24,8 +24,9 @@ pub fn to_txt(results: &[QueryResult]) -> String {
 
     // Preserve insertion order
     let mut usernames: Vec<&str> = Vec::new();
+    let mut seen = HashSet::new();
     for r in results {
-        if !usernames.contains(&r.username.as_str()) {
+        if seen.insert(r.username.as_str()) {
             usernames.push(&r.username);
         }
     }
