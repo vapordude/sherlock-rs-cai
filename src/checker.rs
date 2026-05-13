@@ -348,3 +348,107 @@ fn determine_status(site: &SiteData, status_code: u16, body: &str) -> QueryStatu
         _ => QueryStatus::Unknown,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sites::{ErrorCode, SiteData};
+
+    fn create_test_site(error_type: &str, error_code: Option<ErrorCode>) -> SiteData {
+        SiteData {
+            error_msg: None,
+            error_type: error_type.to_string(),
+            error_code,
+            error_url: None,
+            url: "https://example.com/user/{}".to_string(),
+            url_main: "https://example.com/".to_string(),
+            url_probe: None,
+            username_claimed: None,
+            username_unclaimed: None,
+            regex_check: None,
+            is_nsfw: None,
+            headers: None,
+            request_method: None,
+            request_payload: None,
+        }
+    }
+
+    #[test]
+    fn test_determine_status_waf_detection() {
+        let site = create_test_site("status_code", None);
+        // Should return Waf regardless of status code if body contains WAF signature
+        assert_eq!(
+            determine_status(&site, 200, "Just a moment..."),
+            QueryStatus::Waf
+        );
+        assert_eq!(
+            determine_status(&site, 404, "Attention Required! | Cloudflare"),
+            QueryStatus::Waf
+        );
+    }
+
+    #[test]
+    fn test_determine_status_code_default_404() {
+        let site = create_test_site("status_code", None);
+
+        // 404 is default error code for status_code error type
+        assert_eq!(determine_status(&site, 404, ""), QueryStatus::Available);
+        // 200-299 is claimed
+        assert_eq!(determine_status(&site, 200, ""), QueryStatus::Claimed);
+        assert_eq!(determine_status(&site, 299, ""), QueryStatus::Claimed);
+        // Others are unknown
+        assert_eq!(determine_status(&site, 500, ""), QueryStatus::Unknown);
+        assert_eq!(determine_status(&site, 302, ""), QueryStatus::Unknown);
+    }
+
+    #[test]
+    fn test_determine_status_code_custom_single() {
+        let site = create_test_site("status_code", Some(ErrorCode::Single(403)));
+
+        assert_eq!(determine_status(&site, 403, ""), QueryStatus::Available);
+        assert_eq!(determine_status(&site, 404, ""), QueryStatus::Unknown);
+        assert_eq!(determine_status(&site, 200, ""), QueryStatus::Claimed);
+    }
+
+    #[test]
+    fn test_determine_status_code_custom_multiple() {
+        let site = create_test_site("status_code", Some(ErrorCode::Multiple(vec![401, 403])));
+
+        assert_eq!(determine_status(&site, 401, ""), QueryStatus::Available);
+        assert_eq!(determine_status(&site, 403, ""), QueryStatus::Available);
+        assert_eq!(determine_status(&site, 404, ""), QueryStatus::Unknown);
+        assert_eq!(determine_status(&site, 200, ""), QueryStatus::Claimed);
+    }
+
+    #[test]
+    fn test_determine_status_message() {
+        let mut site = create_test_site("message", None);
+        site.error_msg = Some(crate::sites::ErrorMsg::Single("Not Found".to_string()));
+
+        assert_eq!(
+            determine_status(&site, 200, "User Not Found"),
+            QueryStatus::Available
+        );
+        assert_eq!(
+            determine_status(&site, 200, "User exists"),
+            QueryStatus::Claimed
+        );
+        assert_eq!(
+            determine_status(&site, 404, "Not Found"),
+            QueryStatus::Available
+        );
+        assert_eq!(
+            determine_status(&site, 500, "Something else"),
+            QueryStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn test_determine_status_response_url() {
+        let site = create_test_site("response_url", None);
+
+        assert_eq!(determine_status(&site, 200, ""), QueryStatus::Claimed);
+        assert_eq!(determine_status(&site, 404, ""), QueryStatus::Available);
+        assert_eq!(determine_status(&site, 302, ""), QueryStatus::Available);
+    }
+}
