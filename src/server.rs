@@ -96,7 +96,7 @@ async fn search_handler(
         let mut seen = std::collections::HashSet::new();
         params
             .usernames
-            .split(|c: char| c == ',' || c == '\n' || c == ';')
+            .split([',', '\n', ';'])
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty() && seen.insert(s.clone()))
             .take(10)
@@ -144,8 +144,7 @@ async fn search_handler(
             }
 
             // ── Run checker ───────────────────────────────────────────────────
-            let (checker_tx, mut checker_rx) =
-                tokio::sync::mpsc::channel::<QueryResult>(300);
+            let (checker_tx, mut checker_rx) = tokio::sync::mpsc::channel::<QueryResult>(300);
 
             let sites_clone = sites.clone();
             let uname = username.clone();
@@ -200,9 +199,7 @@ async fn search_handler(
             .unwrap_or_default();
 
             if sse_tx
-                .send(Ok(Event::default()
-                    .event("username_done")
-                    .data(done_json)))
+                .send(Ok(Event::default().event("username_done").data(done_json)))
                 .await
                 .is_err()
             {
