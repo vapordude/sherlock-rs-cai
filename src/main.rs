@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
         match sites::load_sites().await {
             Ok(s) => {
                 let count = s.len();
-                *state_clone.sites.write().await = Some(s);
+                *state_clone.sites.write().await = Some(Arc::new(s));
                 println!("\x1b[32m{} sites loaded\x1b[0m", count);
             }
             Err(e) => {
