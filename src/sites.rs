@@ -71,7 +71,7 @@ fn data_dir() -> PathBuf {
 
 pub async fn load_sites() -> Result<HashMap<String, SiteData>> {
     let path = data_dir().join("data.json");
-    if path.exists() {
+    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
         let json = tokio::fs::read_to_string(&path).await?;
         return parse_sites(&json);
     }
