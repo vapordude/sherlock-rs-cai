@@ -59,13 +59,13 @@ fn random_ua() -> &'static str {
 
 // ── WAF signatures ────────────────────────────────────────────────────────────
 const WAF_SIGNATURES: &[&str] = &[
-    "Attention Required! | Cloudflare",
+    "attention required! | cloudflare",
     "cf-browser-verification",
-    "Please Wait... | Cloudflare",
-    "Just a moment...",
-    "Checking your browser",
-    "Pardon Our Interruption",
-    "Access denied | ",
+    "please wait... | cloudflare",
+    "just a moment...",
+    "checking your browser",
+    "pardon our interruption",
+    "access denied | ",
     "_cf_chl_opt",
 ];
 
@@ -300,7 +300,7 @@ fn detect_waf(body: &str) -> bool {
     let lower = body.to_lowercase();
     WAF_SIGNATURES
         .iter()
-        .any(|sig| lower.contains(&sig.to_lowercase()))
+        .any(|&sig| lower.contains(sig))
 }
 
 fn determine_status(site: &SiteData, status_code: u16, body: &str) -> QueryStatus {
