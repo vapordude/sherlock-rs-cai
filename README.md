@@ -51,6 +51,7 @@
 | 📥 **Export** | Download results as CSV (spreadsheet) or TXT |
 | 🔎 **Filter & sort** | Sort by name, status or response time — live text filter |
 | 📦 **Zero install** | Single self-contained 5 MB `.exe`, no dependencies required |
+| 🧩 **Modular Lists** | Drop JSON configs into `sites.d` to merge lists from Maigret, WhatsMyName, etc. |
 
 ---
 
@@ -113,6 +114,28 @@ Each username gets its own tab with a live counter of accounts found. The tab be
 | **NSFW** | Include adult content platforms in the search |
 | **Proxy** | SOCKS5 or HTTP proxy URL, e.g. `socks5://127.0.0.1:9050` for Tor |
 | **Update DB** | Downloads the latest site database from GitHub |
+
+### Custom Sites & Modularisation
+
+Sherlock-RS supports modular site lists. While it automatically fetches the upstream Sherlock `data.json` database, you can dynamically expand its coverage by dropping your own `.json` files into the local `sites.d` configuration directory.
+
+The location of this directory depends on your OS:
+- **Windows**: `%APPDATA%\sherlock-rs\sites.d` (or `Local\sherlock-rs\sites.d`)
+- **macOS/Linux**: `~/.local/share/sherlock-rs/sites.d`
+
+Whenever Sherlock-RS starts or you click **Update DB**, it will load the primary database and merge it with any `.json` files found in the `sites.d` folder.
+
+#### Adapting OSINT/SOCMINT Lists
+You can easily incorporate databases from other top-tier OSINT tools by converting them to the [Sherlock JSON schema](https://github.com/sherlock-project/sherlock/blob/master/sherlock_project/resources/data.json).
+
+Exhaustive list of contemporary tools whose site lists can be adapted:
+1. **WhatsMyName (WebOsis)**: The largest and most actively maintained OSINT username database (over 600+ sites). Converts perfectly via mapping `uri_check` to `url` and matching their `string_match` to Sherlock's `errorMsg` or `status_code` logic.
+2. **Maigret**: A powerful fork of Sherlock with enhanced extraction. Their sites list natively supports the Sherlock JSON schema with extra metadata. Just copy their JSON into `sites.d/maigret.json`.
+3. **Blackbird**: An ultra-fast scanner. Its site lists can be parsed into Sherlock's format, primarily relying on HTTP status code checks.
+4. **Nexfil**: A fast OSINT tool written in Python. Its JSON mappings (`url`, `errorType`) can be mapped directly to Sherlock's format.
+5. **Holehe**: Primarily used for email OSINT, but tracks unique site endpoints. Endpoints can be mapped if user-facing profile URLs are available.
+
+*Note: Ensure your custom JSON files do not have overlapping site keys with the main database unless you intend to overwrite the default behavior.*
 
 ### Keyboard shortcuts
 

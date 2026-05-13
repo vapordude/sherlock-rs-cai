@@ -1,6 +1,8 @@
 use crate::result::{QueryResult, QueryStatus};
 use std::collections::HashMap;
 
+/// Formats an array of query results into a structured CSV string.
+/// Includes headers and row entries for Username, Site, URL, Status, and Response Time.
 pub fn to_csv(results: &[QueryResult]) -> String {
     let mut wtr = csv::Writer::from_writer(vec![]);
     let _ = wtr.write_record(["Username", "Site", "URL", "Status", "Response Time (ms)"]);
@@ -16,6 +18,8 @@ pub fn to_csv(results: &[QueryResult]) -> String {
     String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
 }
 
+/// Formats an array of query results into a human-readable text string.
+/// Groups only the successfully claimed accounts by target username.
 pub fn to_txt(results: &[QueryResult]) -> String {
     let mut by_username: HashMap<&str, Vec<&QueryResult>> = HashMap::new();
     for r in results {

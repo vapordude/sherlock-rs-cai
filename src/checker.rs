@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::sleep;
 
-// ── 25 real browser User-Agents ─────────────────────────────────────────────
+/// ── 25 real browser User-Agents ─────────────────────────────────────────────
+/// A curated list of real, modern browser `User-Agent` strings used
+/// to rotate identities dynamically and reduce bot detection blocks.
 const USER_AGENTS: &[&str] = &[
     // Chrome Windows
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -69,12 +71,17 @@ const WAF_SIGNATURES: &[&str] = &[
     "_cf_chl_opt",
 ];
 
+/// Execution configuration passed to the engine during a target scan.
 pub struct CheckConfig {
     pub timeout_secs: u64,
     pub include_nsfw: bool,
     pub proxy: Option<String>,
 }
 
+/// The core orchestration function managing a concurrent scan across
+/// all configured sites for a single username target. It enforces NSFW filters,
+/// regex validations, rotates proxies/user-agents, and delegates individual site
+/// checks to sub-tasks utilizing exponential backoffs upon failures.
 pub async fn check_username(
     username: &str,
     sites: &HashMap<String, SiteData>,
@@ -157,7 +164,10 @@ pub async fn check_username(
     }
 }
 
-// ── Retry wrapper: up to 3 attempts with exponential backoff ─────────────────
+/// ── Retry wrapper: up to 3 attempts with exponential backoff ─────────────────
+/// Wraps individual site requests with robust retry logic, firing up to 3 attempts
+/// spaced by an exponential backoff specifically for network layer errors (timeouts,
+/// DNS failures). Legitimate HTTP responses (even 403 or 404) skip retries immediately.
 async fn check_site_with_retry(
     name: &str,
     site: &SiteData,
@@ -208,7 +218,10 @@ async fn check_site_with_retry(
     final_result
 }
 
-// ── Core request function ─────────────────────────────────────────────────────
+/// ── Core request function ─────────────────────────────────────────────────────
+/// Formats the final URL payload and executes a single HTTP request evaluating
+/// if the specified username is actively present on the target site.
+/// Captures WAF signatures and specific HTTP return codes or error messages.
 async fn check_site(
     name: &str,
     site: &SiteData,
