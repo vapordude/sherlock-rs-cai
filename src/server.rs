@@ -77,6 +77,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/vault/lock", post(vault_lock_handler))
         .route("/api/profiles", get(profiles_list_handler))
         .route("/api/profiles/:id", get(profile_detail_handler))
+        .route("/api/profiles/:id", axum::routing::delete(profile_delete_handler))
+        .route("/api/profiles/:id/note", post(profile_note_handler))
+        .route("/api/media/:id", get(media_get_handler))
         .route("/api/review/pending", get(review_pending_handler))
         .route("/api/review/count", get(review_count_handler))
         .route("/api/review/:id/accept", post(review_accept_handler))
@@ -129,6 +132,18 @@ struct SearchParams {
     #[serde(default)]
     #[cfg_attr(not(feature = "vault"), allow(dead_code))]
     auto_accept: bool,
+    /// Override the default 0.80 auto-accept threshold. Clamped to
+    /// [0.50, 0.95] server-side. Has no effect when `auto_accept=false`.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "vault"), allow(dead_code))]
+    auto_accept_threshold: Option<f64>,
+    /// When set, fetch any `avatar_url` extracted from a `Claimed` hit and
+    /// store the bytes (under SQLCipher encryption) against the profile.
+    /// Only fires on the auto-accept path — queued proposals don't
+    /// pre-fetch media to keep the UI snappy.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "vault"), allow(dead_code))]
+    download_media: bool,
 }
 
 #[derive(Serialize)]
@@ -175,6 +190,8 @@ struct SearchTaskArgs {
 struct VaultScanCtx {
     vault: Arc<VaultState>,
     auto_accept: bool,
+    auto_accept_threshold: Option<f64>,
+    download_media: bool,
 }
 
 /// Drives the per-username checker fan-out and forwards SSE events to the
@@ -279,11 +296,25 @@ fn spawn_search_task(args: SearchTaskArgs) {
                                 extracted,
                                 result.confidence,
                                 ctx.auto_accept,
+                                ctx.auto_accept_threshold,
                             )
                             .await
                             {
-                                Ok(crate::vault::ProposalOutcome::Applied { .. }) => {
+                                Ok(crate::vault::ProposalOutcome::Applied { profile_id }) => {
                                     auto_accepted += 1;
+                                    // Opt-in media fetch (avatars only, V1).
+                                    if ctx.download_media {
+                                        if let Some(crate::result::ExtractedValue::One(url)) =
+                                            extracted.get("avatar_url")
+                                        {
+                                            let _ = fetch_and_store_avatar(
+                                                &ctx.vault,
+                                                &profile_id,
+                                                url,
+                                            )
+                                            .await;
+                                        }
+                                    }
                                 }
                                 Ok(crate::vault::ProposalOutcome::Queued { .. }) => {
                                     queued += 1;
@@ -394,6 +425,8 @@ async fn search_handler(
         Some(VaultScanCtx {
             vault: state.vault.clone(),
             auto_accept: params.auto_accept,
+            auto_accept_threshold: params.auto_accept_threshold,
+            download_media: params.download_media,
         })
     } else {
         None
@@ -558,6 +591,52 @@ async fn vault_lock_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 }
 
+// ── Media fetch helper ───────────────────────────────────────────────────────
+
+/// Fetch the avatar URL with a tight timeout + a 2 MiB body cap, then
+/// hand the bytes off to the vault. Non-fatal — a failed fetch is logged
+/// to stderr and the search continues. Only image MIME types are stored
+/// to avoid surprises (no `text/html` blobs sneaking into the gallery).
+#[cfg(feature = "vault")]
+async fn fetch_and_store_avatar(
+    vault: &std::sync::Arc<VaultState>,
+    profile_id: &str,
+    url: &str,
+) -> anyhow::Result<()> {
+    const MAX_BYTES: usize = 2 * 1024 * 1024;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("avatar fetch HTTP {}", resp.status());
+    }
+    let mime = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if !mime.starts_with("image/") {
+        anyhow::bail!("non-image content-type {mime}");
+    }
+    let bytes = resp.bytes().await?;
+    if bytes.len() > MAX_BYTES {
+        anyhow::bail!("avatar too large ({} bytes)", bytes.len());
+    }
+    crate::vault::record_media(
+        vault,
+        profile_id,
+        None,
+        url,
+        "avatar",
+        &mime,
+        bytes.to_vec(),
+    )
+    .await?;
+    Ok(())
+}
+
 // ── Profiles / Review / Audit (vault feature only) ───────────────────────────
 
 #[cfg(feature = "vault")]
@@ -711,5 +790,92 @@ async fn audit_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
+    }
+}
+
+#[cfg(feature = "vault")]
+#[derive(Deserialize)]
+struct NoteBody {
+    note: String,
+}
+
+#[cfg(feature = "vault")]
+async fn profile_note_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<NoteBody>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.vault.is_locked().await {
+        return vault_locked_response();
+    }
+    if body.note.len() > 64 * 1024 {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "note exceeds 64 KiB"})),
+        );
+    }
+    match crate::vault::update_profile_note(&state.vault, &id, &body.note).await {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "profile not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+async fn profile_delete_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.vault.is_locked().await {
+        return vault_locked_response();
+    }
+    match crate::vault::delete_profile(&state.vault, &id).await {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "profile not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+async fn media_get_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if state.vault.is_locked().await {
+        return vault_locked_response().into_response();
+    }
+    match crate::vault::fetch_media(&state.vault, id).await {
+        Ok(Some((mime, bytes))) => (
+            [
+                (header::CONTENT_TYPE, mime),
+                // Cache aggressively — these bytes are immutable per id.
+                (header::CACHE_CONTROL, "private, max-age=3600".into()),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "not found"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }

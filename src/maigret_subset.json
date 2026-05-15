@@ -33,10 +33,12 @@
       "m_code": 404
     },
     "extractors": [
-      { "field": "avatar_url",   "selector": "img.avatar-user", "attribute": "src" },
-      { "field": "display_name", "selector": "span.vcard-fullname" },
-      { "field": "bio",          "selector": "div.user-profile-bio" },
-      { "field": "location",     "selector": "li[itemprop=\"homeLocation\"] span" }
+      { "field": "avatar_url",      "selector": "img.avatar-user",                "attribute": "src" },
+      { "field": "display_name",    "selector": "span.vcard-fullname" },
+      { "field": "bio",             "selector": "div.user-profile-bio" },
+      { "field": "location",        "selector": "li[itemprop=\"homeLocation\"] span" },
+      { "field": "external_links",  "selector": "li[itemprop=\"url\"] a",         "attribute": "href", "multi": true },
+      { "field": "follower_count",  "selector": "a[href$=\"?tab=followers\"] span", "regex": "([0-9.,kKmM]+)" }
     ]
   }
 }
