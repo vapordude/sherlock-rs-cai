@@ -85,6 +85,35 @@ The resulting binary is functionally identical to today's Sherlock-RS — all va
 
 ---
 
+## Running on Termux (Android)
+
+Tested on a Snapdragon-class device. Everything works — vault, image similarity, the full UI — given enough patience for the first SQLCipher build (~10–20 min on phone CPU). The Android binary detects its target at runtime and uses `termux-open-url` instead of `xdg-open`, so the browser auto-launches if you have `termux-api` installed; otherwise the URL is printed to the terminal and you open it manually in Chrome / Firefox.
+
+```bash
+# One-time setup
+pkg install -y rust git clang make pkg-config
+pkg install -y termux-api          # optional, enables auto-browser-open
+termux-setup-storage               # grant storage access for ~/.local/share
+
+# Build + run
+git clone https://github.com/vapordude/sherlock-rs-cai.git
+cd sherlock-rs-cai
+cargo build --release              # full features (vault, similarity, etc.)
+# — OR for a fast first test without SQLCipher: —
+# cargo build --release --no-default-features
+
+./target/release/sherlock-rs
+# Open the printed http://127.0.0.1:<port> URL in your phone browser.
+```
+
+Build-time tips:
+- **SQLCipher is the slow part.** It compiles OpenSSL + SQLite from source via the `bundled-sqlcipher-vendored-openssl` feature. One-time cost.
+- **First-run model fetches.** None — pHash + composite-fingerprint image similarity are pure CPU, no model files.
+- **Storage.** Vault DB lives at `$HOME/.local/share/sherlock-rs/vault.db`. SQLCipher-encrypted at rest.
+- **Battery.** Network-bound; scanning 1000 sites is mostly idle wait. Light.
+
+---
+
 ## Installation
 
 ### Quick method — Download the binary
