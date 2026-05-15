@@ -296,6 +296,7 @@ body::before {
 .badge-unknown   { background: rgba(239,68,68,.12);   color: var(--red); }
 .badge-illegal   { background: rgba(100,116,139,.08); color: var(--text-muted); }
 .badge-waf       { background: rgba(245,158,11,.15);  color: var(--amber); }
+.badge-tentative { background: rgba(245,158,11,.10);  color: var(--amber); border: 1px dashed rgba(245,158,11,.4); }
 
 .copy-btn {
   width: 28px; height: 28px; background: none;
@@ -476,6 +477,9 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 <div class="top-bar">
   <button class="review-pill" id="reviewPill" onclick="openReviewDialog()" title="Pending reviews">
     &#x1f4cb; <span id="reviewCount">0</span> pending
+  </button>
+  <button class="vault-pill" id="profilesPill" onclick="openProfilesDialog()" title="Saved profiles" style="display:none;">
+    &#x1f464; <span id="profilesCount">Profiles</span>
   </button>
   <button class="vault-pill uninit" id="vaultPill" onclick="openVaultDialog()" title="Vault">
     &#x1f512; <span id="vaultPillLabel">Vault</span>
@@ -746,13 +750,17 @@ function paintVault() {
   const pill  = document.getElementById('vaultPill');
   const label = document.getElementById('vaultPillLabel');
   const banner = document.getElementById('vaultBanner');
+  const profilesPill = document.getElementById('profilesPill');
   pill.classList.remove('locked','unlocked','uninit');
   if (!vaultState.initialized) {
     pill.classList.add('uninit'); label.textContent = 'Set up vault';
+    profilesPill.style.display = 'none';
   } else if (vaultState.locked) {
     pill.classList.add('locked'); label.textContent = 'Unlock vault';
+    profilesPill.style.display = 'none';
   } else {
     pill.classList.add('unlocked'); label.textContent = 'Vault unlocked';
+    profilesPill.style.display = 'flex';
   }
   // Save-to-vault toggle banner: only show when save is enabled but vault is unusable.
   const save = document.getElementById('saveEvidence');
@@ -760,6 +768,35 @@ function paintVault() {
   if (save && save.checked && !usable) banner.classList.add('show');
   else                                  banner.classList.remove('show');
   syncAutoAccept();
+}
+
+async function openProfilesDialog() {
+  if (vaultState.locked) { openVaultDialog(); return; }
+  showDialog('profilesDialog');
+  const root = document.getElementById('profilesList');
+  root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  try {
+    const res  = await fetch('/api/profiles');
+    const data = await res.json();
+    const list = data.profiles || [];
+    if (list.length === 0) {
+      root.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profiles yet. Run a search with "Save to vault" enabled.</p></div>';
+      return;
+    }
+    root.innerHTML = list.map(p => `
+      <div class="pending-card">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <strong style="color:var(--text);">${escHtml(p.label)}</strong>
+          <span class="pending-score">${p.evidence_count} evidence rows</span>
+        </div>
+        <div class="pending-rationale" style="font-size:.75rem;">
+          created ${escHtml(p.created_at.slice(0,19))} • updated ${escHtml(p.updated_at.slice(0,19))}
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    root.innerHTML = `<div class="dlg-err">Failed to load: ${escHtml(e.message)}</div>`;
+  }
 }
 
 function openVaultDialog() {
@@ -1094,7 +1131,7 @@ function scheduleRender() {
   }
 }
 
-const statusOrder = { claimed:0, waf:1, unknown:2, illegal:3, available:4 };
+const statusOrder = { claimed:0, tentative:1, waf:2, unknown:3, illegal:4, available:5 };
 
 function renderResults() {
   if (!activeTab || !tabState[activeTab]) return;
@@ -1121,7 +1158,14 @@ function renderResults() {
 }
 
 function badgeLabel(status) {
-  return { claimed:'&#x2713; Found', available:'Not Found', unknown:'Error', illegal:'Invalid', waf:'Blocked' }[status] || status;
+  return {
+    claimed:   '&#x2713; Found',
+    available: 'Not Found',
+    unknown:   'Error',
+    illegal:   'Invalid',
+    waf:       'Blocked',
+    tentative: '? Tentative',
+  }[status] || status;
 }
 
 function resultRowHtml(r) {
