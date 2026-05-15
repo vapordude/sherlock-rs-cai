@@ -1,4 +1,5 @@
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -71,6 +72,18 @@ pub struct SiteData {
     pub headers: Option<HashMap<String, String>>,
     pub request_method: Option<String>,
     pub request_payload: Option<serde_json::Value>,
+    /// Regex compiled once at parse time from `regex_check`. Skipped during
+    /// (de)serialization — the on-disk `data.json` keeps only the source
+    /// pattern, and this is rebuilt on every load.
+    #[serde(skip)]
+    pub compiled_regex: Option<Regex>,
+}
+
+impl SiteData {
+    /// Substitutes the `{}` placeholder in `self.url` with the given username.
+    pub fn format_url(&self, username: &str) -> String {
+        self.url.replace("{}", username)
+    }
 }
 
 /// Determines the local application data directory to cache site lists.
@@ -149,10 +162,20 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
 /// stripping extraneous keys like `$schema`.
 fn parse_sites(json: &str) -> Result<HashMap<String, SiteData>> {
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(json)?;
-    let sites = raw
+    let mut sites: HashMap<String, SiteData> = raw
         .into_iter()
         .filter(|(k, _)| k != "$schema")
         .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
         .collect();
+
+    // Compile each site's regex_check once now to avoid re-parsing in the
+    // request hot path. A failed compile leaves `compiled_regex == None`,
+    // matching the prior behavior of silently skipping validation.
+    for site in sites.values_mut() {
+        if let Some(pattern) = &site.regex_check {
+            site.compiled_regex = Regex::new(pattern).ok();
+        }
+    }
+
     Ok(sites)
 }

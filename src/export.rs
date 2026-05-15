@@ -1,5 +1,5 @@
 use crate::result::{QueryResult, QueryStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Formats an array of query results into a structured CSV string.
 /// Includes headers and row entries for Username, Site, URL, Status, and Response Time.
@@ -12,7 +12,9 @@ pub fn to_csv(results: &[QueryResult]) -> String {
             &r.site_name,
             &r.site_url,
             r.status.as_str(),
-            &r.response_time_ms.map(|t| t.to_string()).unwrap_or_default(),
+            &r.response_time_ms
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
         ]);
     }
     String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
@@ -26,11 +28,13 @@ pub fn to_txt(results: &[QueryResult]) -> String {
         by_username.entry(r.username.as_str()).or_default().push(r);
     }
 
-    // Preserve insertion order
+    // Preserve insertion order; use a HashSet for O(1) seen-check instead of
+    // the previous O(N) Vec::contains scan per row.
     let mut usernames: Vec<&str> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     for r in results {
-        if !usernames.contains(&r.username.as_str()) {
-            usernames.push(&r.username);
+        if seen.insert(r.username.as_str()) {
+            usernames.push(r.username.as_str());
         }
     }
 

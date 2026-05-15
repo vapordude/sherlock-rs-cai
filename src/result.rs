@@ -1,7 +1,7 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The determined state indicating whether a username profile exists on a site.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum QueryStatus {
     /// The target username was definitively found on this platform.
@@ -30,7 +30,7 @@ impl QueryStatus {
 }
 
 /// The unified response model produced by the checker engine mapping a single target query payload.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     /// The active username being checked.
     pub username: String,

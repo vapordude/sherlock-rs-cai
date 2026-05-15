@@ -17,10 +17,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 
-/// Shared application state orchestrating in-memory caching and export contexts across Axum handlers.
+/// Shared application state orchestrating in-memory caching across Axum handlers.
+///
+/// Per-request scan results are *not* held here — exports are stateless and
+/// receive the result set from the client over a POST body, so concurrent
+/// users never collide on a shared `last_results` vector.
 pub struct AppState {
     pub sites: RwLock<Option<Arc<HashMap<String, SiteData>>>>,
-    pub last_results: RwLock<Vec<QueryResult>>,
     pub load_error: RwLock<Option<String>>,
 }
 
@@ -29,7 +32,6 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             sites: RwLock::new(None),
-            last_results: RwLock::new(Vec::new()),
             load_error: RwLock::new(None),
         }
     }
@@ -41,8 +43,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/api/status", get(status_handler))
         .route("/api/search", get(search_handler))
-        .route("/api/export/csv", get(export_csv_handler))
-        .route("/api/export/txt", get(export_txt_handler))
+        .route("/api/export/csv", post(export_csv_handler))
+        .route("/api/export/txt", post(export_txt_handler))
         .route("/api/update-db", post(update_db_handler))
         .with_state(state)
 }
@@ -90,45 +92,36 @@ struct SseResultData {
     total: usize,
 }
 
-/// Executes a live scan spanning active sites streaming SSE events conveying result resolutions locally.
-async fn search_handler(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<SearchParams>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(500);
+/// Parses a comma/newline/semicolon-separated list of usernames into a
+/// deduplicated, trimmed, length-capped vector. Order is preserved.
+fn parse_usernames(raw: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    raw.split([',', '\n', ';'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
+        .take(10)
+        .collect()
+}
 
-    // Parse and deduplicate usernames
-    let usernames: Vec<String> = {
-        let mut seen = std::collections::HashSet::new();
-        params
-            .usernames
-            .split(|c: char| c == ',' || c == '\n' || c == ';')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && seen.insert(s.clone()))
-            .take(10)
-            .collect()
-    };
+/// Inputs needed by the background scan task spawned from `search_handler`.
+struct SearchTaskArgs {
+    usernames: Vec<String>,
+    sites: Arc<HashMap<String, SiteData>>,
+    total: usize,
+    config: CheckConfig,
+    sse_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+}
 
-    if usernames.is_empty() {
-        let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
-        return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
-    }
-
-    let sites_guard = state.sites.read().await;
-    let sites = sites_guard.clone().unwrap_or_default();
-    drop(sites_guard);
-
-    let include_nsfw = params.nsfw.unwrap_or(false);
-    let total: usize = sites
-        .values()
-        .filter(|s| include_nsfw || !s.is_nsfw.unwrap_or(false))
-        .count();
-
-    let timeout_secs = params.timeout.unwrap_or(30);
-    let proxy = params.proxy.clone();
-
-    // Clear previous results
-    state.last_results.write().await.clear();
+/// Drives the per-username checker fan-out and forwards SSE events to the
+/// client. Owns its inputs; touches no shared state.
+fn spawn_search_task(args: SearchTaskArgs) {
+    let SearchTaskArgs {
+        usernames,
+        sites,
+        total,
+        config,
+        sse_tx,
+    } = args;
 
     tokio::spawn(async move {
         for username in &usernames {
@@ -150,19 +143,18 @@ async fn search_handler(
             }
 
             // ── Run checker ───────────────────────────────────────────────────
-            let (checker_tx, mut checker_rx) =
-                tokio::sync::mpsc::channel::<QueryResult>(300);
+            let (checker_tx, mut checker_rx) = tokio::sync::mpsc::channel::<QueryResult>(300);
 
             let sites_clone = sites.clone();
             let uname = username.clone();
-            let config = CheckConfig {
-                timeout_secs,
-                include_nsfw,
-                proxy: proxy.clone(),
+            let task_config = CheckConfig {
+                timeout_secs: config.timeout_secs,
+                include_nsfw: config.include_nsfw,
+                proxy: config.proxy.clone(),
             };
 
             tokio::spawn(async move {
-                checker::check_username(&uname, &sites_clone, &config, checker_tx).await;
+                checker::check_username(&uname, &sites_clone, &task_config, checker_tx).await;
             });
 
             let mut checked = 0usize;
@@ -176,16 +168,14 @@ async fn search_handler(
 
                 let event_data = SseResultData {
                     username: username.clone(),
-                    site_name: result.site_name.clone(),
-                    url_main: result.url_main.clone(),
-                    site_url: result.site_url.clone(),
+                    site_name: result.site_name,
+                    url_main: result.url_main,
+                    site_url: result.site_url,
                     status: result.status.as_str().to_string(),
                     response_time_ms: result.response_time_ms,
                     checked,
                     total,
                 };
-
-                state.last_results.write().await.push(result);
 
                 let json = serde_json::to_string(&event_data).unwrap_or_default();
                 if sse_tx
@@ -206,9 +196,7 @@ async fn search_handler(
             .unwrap_or_default();
 
             if sse_tx
-                .send(Ok(Event::default()
-                    .event("username_done")
-                    .data(done_json)))
+                .send(Ok(Event::default().event("username_done").data(done_json)))
                 .await
                 .is_err()
             {
@@ -217,31 +205,58 @@ async fn search_handler(
         }
 
         // ── Overall done ──────────────────────────────────────────────────────
-        let total_found = state
-            .last_results
-            .read()
-            .await
-            .iter()
-            .filter(|r| r.status == QueryStatus::Claimed)
-            .count();
-
         let _ = sse_tx
             .send(Ok(Event::default().event("done").data(
                 serde_json::to_string(&serde_json::json!({
-                    "total_found": total_found,
                     "total_usernames": usernames.len(),
                 }))
                 .unwrap_or_default(),
             )))
             .await;
     });
+}
+
+/// Executes a live scan spanning active sites, streaming SSE events to the client.
+async fn search_handler(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SearchParams>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let (sse_tx, sse_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(500);
+
+    let usernames = parse_usernames(&params.usernames);
+    if usernames.is_empty() {
+        let (_, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+        return Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default());
+    }
+
+    let sites_guard = state.sites.read().await;
+    let sites = sites_guard.clone().unwrap_or_default();
+    drop(sites_guard);
+
+    let include_nsfw = params.nsfw.unwrap_or(false);
+    let total: usize = sites
+        .values()
+        .filter(|s| include_nsfw || !s.is_nsfw.unwrap_or(false))
+        .count();
+
+    spawn_search_task(SearchTaskArgs {
+        usernames,
+        sites,
+        total,
+        config: CheckConfig {
+            timeout_secs: params.timeout.unwrap_or(30),
+            include_nsfw,
+            proxy: params.proxy.clone(),
+        },
+        sse_tx,
+    });
 
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())
 }
 
-/// Formats a complete scan dataset originating from the cache into CSV.
-async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+/// Formats a client-supplied result set into CSV. Stateless: the caller POSTs
+/// the rows it wants exported, so concurrent users never share a buffer.
+async fn export_csv_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let csv_data = export::to_csv(&results);
     (
         [
@@ -255,9 +270,9 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 }
 
-/// Formats a complete scan dataset originating from the cache into standard TXT.
-async fn export_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+/// Formats a client-supplied result set into a human-readable text report.
+/// Stateless — see `export_csv_handler`.
+async fn export_txt_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let txt_data = export::to_txt(&results);
     (
         [

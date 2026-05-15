@@ -781,8 +781,48 @@ function showToast(msg) {
   setTimeout(() => t.remove(), 2100);
 }
 
-function exportCsv() { window.location.href = '/api/export/csv'; }
-function exportTxt()  { window.location.href = '/api/export/txt'; }
+async function doExport(kind) {
+  // Aggregate every tab's results, preserving username order.
+  const results = [];
+  for (const u of allUsernames) {
+    const s = tabState[u];
+    if (!s) continue;
+    for (const r of s.results) {
+      results.push({
+        username:         r.username,
+        site_name:        r.site_name,
+        url_main:         r.url_main,
+        site_url:         r.site_url,
+        status:           r.status,
+        response_time_ms: (r.response_time_ms ?? null),
+        context:          null,
+      });
+    }
+  }
+  if (results.length === 0) { showToast('No results to export'); return; }
+  try {
+    const res = await fetch('/api/export/' + kind, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(results),
+    });
+    if (!res.ok) { showToast('Export failed (' + res.status + ')'); return; }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'sherlock_results.' + kind;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast('Export failed: ' + e.message);
+  }
+}
+
+function exportCsv() { return doExport('csv'); }
+function exportTxt() { return doExport('txt'); }
 
 async function updateDb() {
   const btn = document.getElementById('updateBtn');
