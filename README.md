@@ -18,7 +18,7 @@
 
 [![Rust](https://img.shields.io/badge/Rust-1.94+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-[![Sites](https://img.shields.io/badge/Sites-478+-brightgreen?style=flat-square)](https://github.com/sherlock-project/sherlock)
+[![Sites](https://img.shields.io/badge/Sites-1000+-brightgreen?style=flat-square)](https://github.com/sherlock-project/sherlock)
 [![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square&logo=windows)](https://github.com/Oli97430/sherlock-rs/releases)
 [![Author](https://img.shields.io/badge/Author-Olivier%20Hoarau-purple?style=flat-square)](mailto:tarraw974@gmail.com)
 
@@ -30,7 +30,7 @@
 
 ## Overview
 
-**Sherlock-RS** scans **478+ social platforms** in parallel to check whether a username exists. Just run the exe: a local server starts, your browser opens automatically, and results stream in real time.
+**Sherlock-RS** scans **~1000 social platforms** (Sherlock + WhatsMyName + vendored Maigret subset, deduplicated by domain) in parallel to check whether a username exists. Just run the exe: a local server starts, your browser opens automatically, and results stream in real time.
 
 > **New:** Simultaneous multi-username search with tabs, automatic rotation of 25 real User-Agents, and smart retry logic on network errors.
 
@@ -40,7 +40,7 @@
 
 | Feature | Details |
 |---|---|
-| 🔍 **478+ sites scanned** | Official Sherlock database, one-click update from the UI |
+| 🔍 **~1000 sites scanned** | Sherlock + WhatsMyName + vendored Maigret subset, merged by normalized domain, one-click update from the UI |
 | 👥 **Multi-username** | Enter multiple names at once (comma or newline), results per tab |
 | ⚡ **Parallel scanning** | 20 concurrent requests via Tokio async — full scan in minutes |
 | 🔄 **User-Agent rotation** | 25 real browsers (Chrome, Firefox, Edge, Safari, Opera…) rotated randomly per request |
