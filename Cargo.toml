@@ -44,6 +44,9 @@ argon2 = { version = "0.5", features = ["std", "password-hash"], optional = true
 zeroize = { version = "1.8", features = ["zeroize_derive"], optional = true }
 secrecy = { version = "0.10", optional = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -4,6 +4,8 @@ mod extract;
 mod result;
 mod server;
 mod sites;
+#[cfg(feature = "vault")]
+mod vault;
 
 use std::sync::Arc;
 
