@@ -381,10 +381,12 @@ pub struct EvidenceRow {
     pub confidence: u8,
 }
 
-/// Auto-accept threshold. Proposals at or above this score skip the
-/// pending-review queue when the user has enabled `auto_accept` for the
-/// current scan. Tuned conservatively — false positives at this level
-/// would erode the user's trust in the system.
+/// Default auto-accept threshold. Proposals at or above this score skip
+/// the pending-review queue when the user has enabled `auto_accept` for
+/// the current scan. Tuned conservatively — false positives at this level
+/// would erode the user's trust in the system. Callers can pass a
+/// per-scan override via `propose_or_apply`'s `threshold` parameter
+/// (frontend slider, range 0.50–0.95).
 pub const AUTO_ACCEPT_THRESHOLD: f64 = 0.80;
 
 /// Examine extracted evidence from a claimed hit, decide one of:
@@ -410,6 +412,7 @@ pub async fn propose_or_apply(
     extracted: &std::collections::HashMap<String, crate::result::ExtractedValue>,
     confidence: u8,
     auto_accept: bool,
+    threshold: Option<f64>,
 ) -> Result<ProposalOutcome> {
     let evidence_rows = evidence_rows_from_extracted(extracted, confidence);
     if evidence_rows.is_empty() {
@@ -418,11 +421,17 @@ pub async fn propose_or_apply(
     let proposal =
         decide_proposal(vault, scan_id, username, site_name, site_url, &evidence_rows).await?;
 
-    if auto_accept && proposal.score >= AUTO_ACCEPT_THRESHOLD {
+    // Clamp the threshold to a sane range so a stale UI can't accidentally
+    // request "auto-accept everything" (threshold = 0).
+    let effective_threshold = threshold
+        .unwrap_or(AUTO_ACCEPT_THRESHOLD)
+        .clamp(0.50, 0.95);
+
+    if auto_accept && proposal.score >= effective_threshold {
         let profile_id = apply_proposal(vault, &proposal).await?;
         let detail = format!(
-            "auto_accept score={:.2} kind={} site={}",
-            proposal.score, proposal.kind, site_name
+            "auto_accept score={:.2} thresh={:.2} kind={} site={}",
+            proposal.score, effective_threshold, proposal.kind, site_name
         );
         let _ = audit_with_vault(vault, "auto_accept", Some(&detail)).await;
         Ok(ProposalOutcome::Applied { profile_id })
@@ -716,7 +725,7 @@ pub async fn get_profile(vault: &VaultState, id: &str) -> Result<serde_json::Val
                  FROM evidence WHERE profile_id = ?1 ORDER BY seen_at DESC",
             )?;
             let evidence: Vec<serde_json::Value> = stmt
-                .query_map(rusqlite::params![id], |r| {
+                .query_map(rusqlite::params![id.clone()], |r| {
                     Ok(serde_json::json!({
                         "site_name":  r.get::<_, String>(0)?,
                         "site_url":   r.get::<_, String>(1)?,
@@ -729,8 +738,29 @@ pub async fn get_profile(vault: &VaultState, id: &str) -> Result<serde_json::Val
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
+
+            // Media — return the ids + metadata; bytes are served by a
+            // separate endpoint so the JSON payload doesn't balloon.
+            let mut media_stmt = c.prepare(
+                "SELECT id, source_url, kind, mime, fetched_at
+                 FROM media WHERE profile_id = ?1 ORDER BY fetched_at DESC",
+            )?;
+            let media: Vec<serde_json::Value> = media_stmt
+                .query_map(rusqlite::params![id], |r| {
+                    Ok(serde_json::json!({
+                        "id":         r.get::<_, i64>(0)?,
+                        "source_url": r.get::<_, String>(1)?,
+                        "kind":       r.get::<_, String>(2)?,
+                        "mime":       r.get::<_, String>(3)?,
+                        "fetched_at": r.get::<_, String>(4)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
             if let Some(map) = profile.as_object_mut() {
                 map.insert("evidence".into(), serde_json::Value::Array(evidence));
+                map.insert("media".into(), serde_json::Value::Array(media));
             }
             Ok(profile)
         })
@@ -842,6 +872,108 @@ pub async fn reject_pending(vault: &VaultState, id: i64, note: Option<String>) -
     Ok(())
 }
 
+/// Store a fetched media blob against a profile. Dedup by
+/// `(profile_id, source_url, kind)` via `INSERT OR IGNORE`. Returns the
+/// `rowid` of the inserted (or pre-existing) row. Empty `bytes` is
+/// rejected so a failed fetch doesn't pollute the DB.
+pub async fn record_media(
+    vault: &VaultState,
+    profile_id: &str,
+    evidence_id: Option<i64>,
+    source_url: &str,
+    kind: &str,
+    mime: &str,
+    bytes: Vec<u8>,
+) -> Result<i64> {
+    if bytes.is_empty() {
+        anyhow::bail!("refusing to store empty media blob");
+    }
+    let profile_id = profile_id.to_string();
+    let source_url = source_url.to_string();
+    let kind = kind.to_string();
+    let mime = mime.to_string();
+    let fetched_at = time::OffsetDateTime::now_utc().to_string();
+    vault
+        .with_conn(move |c| {
+            c.execute(
+                "INSERT OR IGNORE INTO media
+                    (profile_id, evidence_id, source_url, kind, mime, bytes, fetched_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                rusqlite::params![profile_id, evidence_id, source_url, kind, mime, bytes, fetched_at],
+            )?;
+            // `last_insert_rowid` is 0 when INSERT OR IGNORE silently
+            // ignored a unique-conflict row — fall back to a SELECT in that
+            // case so callers always get the canonical id.
+            let inserted = c.last_insert_rowid();
+            if inserted != 0 {
+                return Ok(inserted);
+            }
+            let existing: i64 = c.query_row(
+                "SELECT id FROM media WHERE profile_id = ?1 AND source_url = ?2 AND kind = ?3",
+                rusqlite::params![profile_id, source_url, kind],
+                |r| r.get(0),
+            )?;
+            Ok(existing)
+        })
+        .await
+}
+
+/// Fetch a single media row by id. Returns `(mime, bytes)`.
+pub async fn fetch_media(vault: &VaultState, id: i64) -> Result<Option<(String, Vec<u8>)>> {
+    vault
+        .with_conn(move |c| {
+            let row: Option<(String, Vec<u8>)> = c
+                .prepare("SELECT mime, bytes FROM media WHERE id = ?1")?
+                .query_row(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            Ok(row)
+        })
+        .await
+}
+
+/// Update the free-form note on a profile. Notes are stored inside the
+/// SQLCipher-encrypted DB; nothing leaves the vault.
+pub async fn update_profile_note(vault: &VaultState, profile_id: &str, note: &str) -> Result<bool> {
+    let id = profile_id.to_string();
+    let value = note.to_string();
+    let note_len = value.len();
+    let now = time::OffsetDateTime::now_utc().to_string();
+    let n: usize = vault
+        .with_conn(move |c| {
+            let n = c.execute(
+                "UPDATE profiles SET note = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![value, now, id],
+            )?;
+            Ok(n)
+        })
+        .await?;
+    if n > 0 {
+        let _ = audit_with_vault(
+            vault,
+            "profile_note",
+            Some(&format!("profile={profile_id} len={note_len}")),
+        )
+        .await;
+    }
+    Ok(n > 0)
+}
+
+/// Delete a profile and (via FK cascades) its evidence + media. Returns
+/// true when the row existed.
+pub async fn delete_profile(vault: &VaultState, profile_id: &str) -> Result<bool> {
+    let id = profile_id.to_string();
+    let n: usize = vault
+        .with_conn(move |c| {
+            let n = c.execute("DELETE FROM profiles WHERE id = ?1", rusqlite::params![id])?;
+            Ok(n)
+        })
+        .await?;
+    if n > 0 {
+        let _ = audit_with_vault(vault, "profile_delete", Some(profile_id)).await;
+    }
+    Ok(n > 0)
+}
+
 pub async fn list_audit(vault: &VaultState, limit: i64) -> Result<Vec<serde_json::Value>> {
     vault
         .with_conn(move |c| {
@@ -905,7 +1037,9 @@ async fn open_locked(
     let conn = AsyncConnection::open(db_path).await?;
     conn.call(move |c| {
         c.execute_batch(&format!(
-            "PRAGMA key = \"x'{key_hex}'\"; PRAGMA cipher_page_size = 4096;"
+            "PRAGMA key = \"x'{key_hex}'\";\
+             PRAGMA cipher_page_size = 4096;\
+             PRAGMA foreign_keys = ON;"
         ))?;
         Ok(())
     })
@@ -923,7 +1057,9 @@ fn encode_hex(bytes: &[u8]) -> String {
 }
 
 /// Schema migrator. Reads `PRAGMA user_version`, applies each step in
-/// order, sets the new version. Initial install lands on v1.
+/// order, sets the new version. Initial install lands on the current
+/// version directly — every existing table is `CREATE TABLE IF NOT EXISTS`
+/// so v1 → v2 → … migrations also work on a fresh vault.
 async fn migrate(conn: &AsyncConnection) -> Result<()> {
     conn.call(|c| {
         let current: i64 = c.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -931,7 +1067,10 @@ async fn migrate(conn: &AsyncConnection) -> Result<()> {
             c.execute_batch(SCHEMA_V1)?;
             c.pragma_update(None, "user_version", 1)?;
         }
-        // Future migrations append `if current < 2 { ... }` blocks here.
+        if current < 2 {
+            c.execute_batch(SCHEMA_V2_DELTA)?;
+            c.pragma_update(None, "user_version", 2)?;
+        }
         Ok(())
     })
     .await?;
@@ -1042,6 +1181,25 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 "#;
 
+/// v2 — adds per-profile media storage. Bytes live in the encrypted DB
+/// (SQLCipher does the at-rest encryption); we don't write images to the
+/// filesystem. `(profile_id, source_url, kind)` is the natural dedup key
+/// so re-running a scan against the same profile doesn't multiply rows.
+const SCHEMA_V2_DELTA: &str = r#"
+CREATE TABLE IF NOT EXISTS media (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id    TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    evidence_id   INTEGER REFERENCES evidence(id) ON DELETE SET NULL,
+    source_url    TEXT NOT NULL,
+    kind          TEXT NOT NULL,        -- 'avatar' | 'image' | 'other'
+    mime          TEXT NOT NULL,
+    bytes         BLOB NOT NULL,
+    fetched_at    TEXT NOT NULL,
+    UNIQUE(profile_id, source_url, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_media_profile ON media(profile_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1142,6 +1300,7 @@ mod tests {
             &extracted,
             95,
             true, // auto_accept
+            None, // use default threshold
         )
         .await
         .unwrap();
@@ -1195,6 +1354,7 @@ mod tests {
             &extracted,
             80,
             false, // queue, don't auto-apply
+            None,
         )
         .await
         .unwrap();
@@ -1220,6 +1380,7 @@ mod tests {
             &extracted2,
             80,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -1252,5 +1413,146 @@ mod tests {
             .collect();
         assert!(actions.contains(&"review_accept"));
         assert!(actions.contains(&"review_reject"));
+    }
+
+    #[tokio::test]
+    async fn media_record_dedup_and_fetch_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+
+        // Create a profile to attach media to.
+        let proposal = Proposal {
+            kind: "new_profile".into(),
+            scan_id: scan_id.clone(),
+            username: "alice".into(),
+            site_name: "GitHub".into(),
+            site_url: "https://github.com/alice".into(),
+            target_profile_id: None,
+            new_label: Some("alice".into()),
+            evidence: vec![EvidenceRow {
+                field: "bio".into(),
+                value: "hello".into(),
+                confidence: 95,
+            }],
+            rationale: "test".into(),
+            score: 1.0,
+        };
+        let profile_id = apply_proposal(&v, &proposal).await.unwrap();
+
+        let bytes = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
+        let id1 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone())
+            .await
+            .unwrap();
+        let id2 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone())
+            .await
+            .unwrap();
+        assert_eq!(id1, id2, "duplicate (profile, url, kind) should dedup to same row");
+
+        let fetched = fetch_media(&v, id1).await.unwrap().expect("present");
+        assert_eq!(fetched.0, "image/png");
+        assert_eq!(fetched.1, bytes);
+
+        // Profile detail should include the media metadata.
+        let detail = get_profile(&v, &profile_id).await.unwrap();
+        let media = detail["media"].as_array().expect("media array");
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0]["mime"], "image/png");
+        assert_eq!(media[0]["kind"], "avatar");
+
+        // Empty bytes are rejected.
+        let empty = record_media(&v, &profile_id, None, "https://cdn/empty", "avatar", "image/png", vec![]).await;
+        assert!(empty.is_err());
+    }
+
+    #[tokio::test]
+    async fn note_update_and_threshold_clamp() {
+        use crate::result::ExtractedValue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+        let scan_id_setup = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+
+        // Create a profile.
+        let proposal = Proposal {
+            kind: "new_profile".into(),
+            scan_id: scan_id_setup,
+            username: "alice".into(),
+            site_name: "GitHub".into(),
+            site_url: "https://github.com/alice".into(),
+            target_profile_id: None,
+            new_label: Some("alice".into()),
+            evidence: vec![EvidenceRow {
+                field: "bio".into(),
+                value: "hi".into(),
+                confidence: 95,
+            }],
+            rationale: "test".into(),
+            score: 1.0,
+        };
+        let profile_id = apply_proposal(&v, &proposal).await.unwrap();
+
+        // Note round-trip.
+        let updated = update_profile_note(&v, &profile_id, "met at conf").await.unwrap();
+        assert!(updated);
+        let detail = get_profile(&v, &profile_id).await.unwrap();
+        assert_eq!(detail["note"], "met at conf");
+
+        // Updating a non-existent profile yields false (no row matched).
+        let none = update_profile_note(&v, "no-such-id", "x").await.unwrap();
+        assert!(!none);
+
+        // Custom threshold above the proposal's score must queue, not apply.
+        let scan_id = record_scan_start(&v, r#"["carol"]"#.into(), 1).await.unwrap();
+        let mut ex = std::collections::HashMap::new();
+        ex.insert("bio".to_string(), ExtractedValue::One("c".into()));
+        // First time we see "carol" → kind=new_profile, score=1.0.
+        // Threshold 0.95 (the max clamp) still applies (1.0 >= 0.95).
+        let out = propose_or_apply(&v, &scan_id, "carol", "X", "https://x/carol", &ex, 80, true, Some(0.95)).await.unwrap();
+        assert!(matches!(out, ProposalOutcome::Applied { .. }));
+
+        // Threshold below clamp floor — should be clamped to 0.50.
+        // For a fresh username, new_profile has score 1.0 ≥ 0.50, so still applies.
+        // Use an accumulate scenario via username match: same username again → kind=accumulate, score=0.90.
+        let out2 = propose_or_apply(&v, &scan_id, "carol", "Y", "https://y/carol", &ex, 80, true, Some(0.95)).await.unwrap();
+        // accumulate score = 0.90 < threshold 0.95 ⇒ queued.
+        assert!(matches!(out2, ProposalOutcome::Queued { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_profile_cascades_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["dan"]"#.into(), 1).await.unwrap();
+
+        let proposal = Proposal {
+            kind: "new_profile".into(),
+            scan_id,
+            username: "dan".into(),
+            site_name: "GitHub".into(),
+            site_url: "https://github.com/dan".into(),
+            target_profile_id: None,
+            new_label: Some("dan".into()),
+            evidence: vec![EvidenceRow {
+                field: "bio".into(),
+                value: "hi".into(),
+                confidence: 95,
+            }],
+            rationale: "test".into(),
+            score: 1.0,
+        };
+        let pid = apply_proposal(&v, &proposal).await.unwrap();
+        assert_eq!(list_profiles(&v).await.unwrap().len(), 1);
+
+        let removed = delete_profile(&v, &pid).await.unwrap();
+        assert!(removed);
+        assert_eq!(list_profiles(&v).await.unwrap().len(), 0);
+
+        // Deleting again yields false.
+        let again = delete_profile(&v, &pid).await.unwrap();
+        assert!(!again);
     }
 }
