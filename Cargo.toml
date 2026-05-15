@@ -12,7 +12,15 @@ license = "MIT"
 # skips the SQLCipher compile (saves ~45-90s on a clean build) for contributors
 # not touching encryption.
 default = ["vault"]
-vault = ["dep:rusqlite", "dep:tokio-rusqlite", "dep:argon2", "dep:zeroize", "dep:secrecy"]
+vault = [
+    "dep:rusqlite",
+    "dep:tokio-rusqlite",
+    "dep:argon2",
+    "dep:zeroize",
+    "dep:secrecy",
+    "dep:image",
+    "dep:image_hasher",
+]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -43,6 +51,11 @@ tokio-rusqlite = { version = "0.6", optional = true }
 argon2 = { version = "0.5", features = ["std", "password-hash"], optional = true }
 zeroize = { version = "1.8", features = ["zeroize_derive"], optional = true }
 secrecy = { version = "0.10", optional = true }
+# Perceptual hashing for "find similar avatar" — pure Rust, no model files.
+# Default features (jpeg, png, gif, webp, bmp) cover everything fetched
+# from social-platform CDNs.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp"], optional = true }
+image_hasher = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

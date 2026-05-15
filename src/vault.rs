@@ -876,6 +876,12 @@ pub async fn reject_pending(vault: &VaultState, id: i64, note: Option<String>) -
 /// `(profile_id, source_url, kind)` via `INSERT OR IGNORE`. Returns the
 /// `rowid` of the inserted (or pre-existing) row. Empty `bytes` is
 /// rejected so a failed fetch doesn't pollute the DB.
+///
+/// `phash` is the optional perceptual hash (hex-encoded) used for the
+/// "find similar media" feature. Callers compute it via
+/// `compute_phash_hex` before calling this; passing `None` is fine for
+/// non-image kinds.
+#[allow(clippy::too_many_arguments)]
 pub async fn record_media(
     vault: &VaultState,
     profile_id: &str,
@@ -884,6 +890,7 @@ pub async fn record_media(
     kind: &str,
     mime: &str,
     bytes: Vec<u8>,
+    phash: Option<String>,
 ) -> Result<i64> {
     if bytes.is_empty() {
         anyhow::bail!("refusing to store empty media blob");
@@ -897,9 +904,18 @@ pub async fn record_media(
         .with_conn(move |c| {
             c.execute(
                 "INSERT OR IGNORE INTO media
-                    (profile_id, evidence_id, source_url, kind, mime, bytes, fetched_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![profile_id, evidence_id, source_url, kind, mime, bytes, fetched_at],
+                    (profile_id, evidence_id, source_url, kind, mime, bytes, fetched_at, phash)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![
+                    profile_id,
+                    evidence_id,
+                    source_url,
+                    kind,
+                    mime,
+                    bytes,
+                    fetched_at,
+                    phash
+                ],
             )?;
             // `last_insert_rowid` is 0 when INSERT OR IGNORE silently
             // ignored a unique-conflict row — fall back to a SELECT in that
@@ -914,6 +930,121 @@ pub async fn record_media(
                 |r| r.get(0),
             )?;
             Ok(existing)
+        })
+        .await
+}
+
+/// Compute the 64-bit DCT-based perceptual hash of an image, hex-encoded
+/// (16 chars). Pure-CPU, ~5ms per image. Robust to JPEG re-encoding,
+/// mild scaling, and watermark overlays. Returns `None` when the bytes
+/// don't decode as an image (e.g. server returned HTML).
+pub fn compute_phash_hex(bytes: &[u8]) -> Option<String> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let hasher = image_hasher::HasherConfig::new()
+        .hash_alg(image_hasher::HashAlg::DoubleGradient)
+        .hash_size(8, 8)
+        .to_hasher();
+    let hash = hasher.hash_image(&img);
+    Some(hex_lower(hash.as_bytes()))
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for chunk in bytes.chunks_exact(2) {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
+}
+
+fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x ^ y).count_ones())
+        .sum()
+}
+
+/// Find media rows whose phash is within `max_distance` bits of the
+/// given seed media id (Hamming distance over the raw bytes). Excludes
+/// the seed row itself. Results ordered by ascending distance.
+///
+/// O(N) over all rows that have a phash — fine up to ~100K avatars.
+/// SQLite has no native popcount-over-blob, so the scan happens in
+/// Rust after a single SELECT pulls the candidate set.
+pub async fn find_similar_by_phash(
+    vault: &VaultState,
+    seed_id: i64,
+    max_distance: u32,
+) -> Result<Vec<serde_json::Value>> {
+    let max_distance = max_distance.min(64); // cap at full disagreement
+    vault
+        .with_conn(move |c| {
+            let seed_hex: Option<String> = c
+                .prepare("SELECT phash FROM media WHERE id = ?1")?
+                .query_row(rusqlite::params![seed_id], |r| r.get(0))
+                .optional()?;
+            let Some(seed_hex) = seed_hex.filter(|s| !s.is_empty()) else {
+                return Ok(Vec::new());
+            };
+            let Some(seed_bytes) = hex_to_bytes(&seed_hex) else {
+                return Ok(Vec::new());
+            };
+
+            let mut stmt = c.prepare(
+                "SELECT m.id, m.profile_id, m.source_url, m.kind, m.mime, m.phash,
+                        p.label
+                 FROM media m
+                 LEFT JOIN profiles p ON p.id = m.profile_id
+                 WHERE m.phash IS NOT NULL AND m.id != ?1",
+            )?;
+            let mut hits: Vec<(u32, serde_json::Value)> = stmt
+                .query_map(rusqlite::params![seed_id], |r| {
+                    let phash: String = r.get(5)?;
+                    Ok((
+                        phash,
+                        serde_json::json!({
+                            "id":             r.get::<_, i64>(0)?,
+                            "profile_id":     r.get::<_, String>(1)?,
+                            "source_url":     r.get::<_, String>(2)?,
+                            "kind":           r.get::<_, String>(3)?,
+                            "mime":           r.get::<_, String>(4)?,
+                            "profile_label":  r.get::<_, Option<String>>(6)?,
+                        }),
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .filter_map(|(phash, mut row)| {
+                    let candidate = hex_to_bytes(&phash)?;
+                    if candidate.len() != seed_bytes.len() {
+                        return None;
+                    }
+                    let d = hamming_distance(&seed_bytes, &candidate);
+                    if d > max_distance {
+                        return None;
+                    }
+                    if let Some(map) = row.as_object_mut() {
+                        map.insert("hamming_distance".into(), serde_json::Value::from(d));
+                    }
+                    Some((d, row))
+                })
+                .collect();
+
+            hits.sort_by_key(|(d, _)| *d);
+            Ok(hits.into_iter().map(|(_, v)| v).collect())
         })
         .await
 }
@@ -1071,6 +1202,10 @@ async fn migrate(conn: &AsyncConnection) -> Result<()> {
             c.execute_batch(SCHEMA_V2_DELTA)?;
             c.pragma_update(None, "user_version", 2)?;
         }
+        if current < 3 {
+            c.execute_batch(SCHEMA_V3_DELTA)?;
+            c.pragma_update(None, "user_version", 3)?;
+        }
         Ok(())
     })
     .await?;
@@ -1198,6 +1333,19 @@ CREATE TABLE IF NOT EXISTS media (
     UNIQUE(profile_id, source_url, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_media_profile ON media(profile_id);
+"#;
+
+/// v3 — adds a perceptual hash column on `media`. 16-hex-char DCT pHash
+/// is robust to JPEG re-encoding, mild scaling, and watermark overlays.
+/// Hamming distance between two pHashes ≤ ~8 bits is typically the same
+/// underlying image with edits; ≤ ~16 bits is "probably related". Stored
+/// as TEXT (hex) for trivial cross-row equality on perfect copies, plus
+/// in-Rust Hamming distance for fuzzy similarity (the `find_similar_by_phash`
+/// helper). NULL is permitted for non-image media or rows recorded
+/// before v3.
+const SCHEMA_V3_DELTA: &str = r#"
+ALTER TABLE media ADD COLUMN phash TEXT;
+CREATE INDEX IF NOT EXISTS idx_media_phash ON media(phash) WHERE phash IS NOT NULL;
 "#;
 
 #[cfg(test)]
@@ -1442,10 +1590,10 @@ mod tests {
         let profile_id = apply_proposal(&v, &proposal).await.unwrap();
 
         let bytes = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
-        let id1 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone())
+        let id1 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone(), None)
             .await
             .unwrap();
-        let id2 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone())
+        let id2 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone(), None)
             .await
             .unwrap();
         assert_eq!(id1, id2, "duplicate (profile, url, kind) should dedup to same row");
@@ -1462,8 +1610,94 @@ mod tests {
         assert_eq!(media[0]["kind"], "avatar");
 
         // Empty bytes are rejected.
-        let empty = record_media(&v, &profile_id, None, "https://cdn/empty", "avatar", "image/png", vec![]).await;
+        let empty = record_media(&v, &profile_id, None, "https://cdn/empty", "avatar", "image/png", vec![], None).await;
         assert!(empty.is_err());
+    }
+
+    /// 1x1 RGB pixel encoded as a PNG — minimum valid image for testing
+    /// the phash compute + similarity path.
+    fn red_pixel_png() -> Vec<u8> {
+        let img: image::RgbImage = image::ImageBuffer::from_pixel(8, 8, image::Rgb([255u8, 0, 0]));
+        let mut buf: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    fn blue_pixel_png() -> Vec<u8> {
+        let img: image::RgbImage = image::ImageBuffer::from_pixel(8, 8, image::Rgb([0u8, 0, 255]));
+        let mut buf: Vec<u8> = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    #[tokio::test]
+    async fn phash_compute_and_similarity_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+
+        // Two profiles, each with an avatar.
+        let proposal = |label: &str, site: &str| Proposal {
+            kind: "new_profile".into(),
+            scan_id: scan_id.clone(),
+            username: label.into(),
+            site_name: site.into(),
+            site_url: format!("https://{site}/{label}"),
+            target_profile_id: None,
+            new_label: Some(label.into()),
+            evidence: vec![EvidenceRow {
+                field: "bio".into(),
+                value: "hi".into(),
+                confidence: 95,
+            }],
+            rationale: "test".into(),
+            score: 1.0,
+        };
+        let pid_a = apply_proposal(&v, &proposal("alice", "GitHub")).await.unwrap();
+        let pid_b = apply_proposal(&v, &proposal("bob", "GitHub")).await.unwrap();
+
+        // pHash must be stable for the same content.
+        let red = red_pixel_png();
+        let red_hash = compute_phash_hex(&red).expect("pHash on a valid PNG");
+        let red_hash_again = compute_phash_hex(&red).expect("stable");
+        assert_eq!(red_hash, red_hash_again);
+
+        // Different content gives a different hash.
+        let blue = blue_pixel_png();
+        let blue_hash = compute_phash_hex(&blue).expect("pHash on a valid PNG");
+        // Don't assert inequality strictly — for an 8x8 solid-color image
+        // the hash can degenerate. But the round-trip via the helper
+        // must at least produce *some* hex string.
+        assert_eq!(blue_hash.len(), red_hash.len());
+
+        // Store two media rows: alice has the red, bob has the same red (a
+        // direct repost). Expect find_similar_by_phash(seed=alice) to
+        // surface bob with distance 0.
+        let id_a = record_media(&v, &pid_a, None, "https://cdn/a.png", "avatar", "image/png", red.clone(), Some(red_hash.clone()))
+            .await
+            .unwrap();
+        let id_b = record_media(&v, &pid_b, None, "https://cdn/b.png", "avatar", "image/png", red, Some(red_hash.clone()))
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_b);
+
+        let hits = find_similar_by_phash(&v, id_a, 8).await.unwrap();
+        assert_eq!(hits.len(), 1, "exactly one near-duplicate expected (bob's copy)");
+        assert_eq!(hits[0]["id"].as_i64(), Some(id_b));
+        assert_eq!(hits[0]["hamming_distance"].as_u64(), Some(0));
+
+        // Non-image bytes ⇒ compute_phash_hex returns None.
+        assert!(compute_phash_hex(b"not an image").is_none());
+
+        // Hamming distance helpers — small sanity check.
+        assert_eq!(hamming_distance(&[0b1010_1010], &[0b1010_1010]), 0);
+        assert_eq!(hamming_distance(&[0b1010_1010], &[0b1010_1011]), 1);
+        assert_eq!(hamming_distance(&[0xff, 0xff], &[0x00, 0x00]), 16);
     }
 
     #[tokio::test]

@@ -474,10 +474,37 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 .profile-section-title { color: var(--accent-dim); font-size: .75rem;
   text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
 .profile-media-grid { display: flex; gap: 6px; flex-wrap: wrap; }
-.profile-media-grid img {
+.profile-media-tile { position: relative; display: inline-block; }
+.profile-media-tile img {
   width: 72px; height: 72px; object-fit: cover; border-radius: 6px;
-  border: 1px solid var(--bg-card);
+  border: 1px solid var(--bg-card); display: block;
 }
+.profile-media-tile .similar-btn {
+  position: absolute; bottom: 4px; left: 4px; right: 4px;
+  background: rgba(0,0,0,.75); color: var(--accent);
+  border: 1px solid var(--accent-dim); border-radius: 4px;
+  font-size: .55rem; padding: 1px 3px; cursor: pointer;
+  opacity: 0; transition: opacity .15s;
+}
+.profile-media-tile:hover .similar-btn { opacity: 1; }
+.profile-media-tile .similar-btn:hover { background: var(--bg-card); }
+
+.similar-result-row {
+  display: grid; grid-template-columns: 56px 1fr auto; gap: 10px;
+  align-items: center; padding: 8px;
+  background: var(--bg-deep); border: 1px solid var(--bg-card);
+  border-radius: 6px; margin-bottom: 6px;
+}
+.similar-result-row img { width: 56px; height: 56px; border-radius: 4px; object-fit: cover; }
+.similar-result-row .similar-label { color: var(--text); font-size: .85rem; }
+.similar-result-row .similar-meta  { color: var(--text-muted); font-size: .7rem; word-break: break-all; }
+.similar-distance {
+  display: inline-block; padding: 4px 10px; border-radius: 4px;
+  font-size: .75rem;
+}
+.similar-distance.exact { background: rgba(74,222,128,.15); color: #4ade80; }
+.similar-distance.near  { background: rgba(245,158,11,.15); color: var(--amber); }
+.similar-distance.weak  { background: var(--bg-card); color: var(--text-muted); }
 .profile-evidence-row {
   display: grid; grid-template-columns: 100px 1fr; gap: 6px;
   font-size: .78rem; padding: 3px 0;
@@ -746,6 +773,24 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   </div>
 </dialog>
 
+<!-- ── Similar-media dialog ─────────────────────────────────── -->
+<dialog id="similarDialog" class="app-dialog" style="min-width:560px;">
+  <div class="dlg-body">
+    <div class="dlg-title">Similar avatars</div>
+    <div class="dlg-sub" id="similarSub">Profiles whose stored avatar matches this one by perceptual hash. Lower Hamming distance = stronger match.</div>
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+      <span style="font-size:.78rem; color:var(--text-muted);">Max distance</span>
+      <input type="range" id="similarMaxDistance" min="0" max="32" step="1" value="8" oninput="paintSimilarDistanceLabel()" style="width:140px;">
+      <span id="similarMaxDistanceLabel" style="color:var(--accent); min-width:24px;">8</span>
+      <button class="btn-sm" onclick="refreshSimilar()">Refresh</button>
+    </div>
+    <div id="similarList" style="max-height:50vh; overflow:auto;"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="closeDialog('similarDialog')">Close</button>
+    </div>
+  </div>
+</dialog>
+
 <!-- ── Profiles dialog ──────────────────────────────────────── -->
 <dialog id="profilesDialog" class="app-dialog" style="min-width:720px;">
   <div class="dlg-body">
@@ -914,9 +959,12 @@ function renderProfileDetail(p) {
     ? `<div class="profile-section">
          <div class="profile-section-title">Media (${p.media.length})</div>
          <div class="profile-media-grid">${p.media.map(m =>
-           `<a href="/api/media/${m.id}" target="_blank" rel="noopener" title="${escHtml(m.source_url)}">
-              <img src="/api/media/${m.id}" alt="" onerror="this.style.display='none'">
-            </a>`
+           `<div class="profile-media-tile">
+              <a href="/api/media/${m.id}" target="_blank" rel="noopener" title="${escHtml(m.source_url)}">
+                <img src="/api/media/${m.id}" alt="" onerror="this.style.display='none'">
+              </a>
+              <button class="similar-btn" type="button" onclick="findSimilarMedia(${m.id})" title="Find similar avatars by perceptual hash">&#x1f50d; similar</button>
+            </div>`
          ).join('')}</div>
        </div>`
     : '';
@@ -955,6 +1003,69 @@ async function saveProfileNote() {
     });
     if (!res.ok) showToast('Save note failed: HTTP ' + res.status);
   } catch (e) { showToast('Save note failed: ' + e.message); }
+}
+
+// ── Similar-media (pHash) lookup ─────────────────────────────────────────────
+let similarSeedId = null;
+
+function paintSimilarDistanceLabel() {
+  document.getElementById('similarMaxDistanceLabel').textContent =
+    document.getElementById('similarMaxDistance').value;
+}
+
+async function findSimilarMedia(id) {
+  similarSeedId = id;
+  showDialog('similarDialog');
+  await refreshSimilar();
+}
+
+async function refreshSimilar() {
+  if (similarSeedId == null) return;
+  const dist = document.getElementById('similarMaxDistance').value;
+  const root = document.getElementById('similarList');
+  root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  try {
+    const res = await fetch(`/api/media/${similarSeedId}/similar?max_distance=${encodeURIComponent(dist)}`);
+    if (!res.ok) {
+      root.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
+      return;
+    }
+    const data = await res.json();
+    const matches = data.matches || [];
+    if (matches.length === 0) {
+      root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="icon">&#x2713;</div><p>No similar avatars within distance ' + dist + '.</p></div>';
+      return;
+    }
+    root.innerHTML = matches.map(m => {
+      const d  = m.hamming_distance;
+      const cls = d <= 2 ? 'exact' : d <= 10 ? 'near' : 'weak';
+      const label = (d === 0 ? '0 — identical' : d + ' bits');
+      return `<div class="similar-result-row">
+        <img src="/api/media/${m.id}" alt="" onerror="this.style.display='none'">
+        <div>
+          <div class="similar-label">${escHtml(m.profile_label || '(untitled)')}</div>
+          <div class="similar-meta">${escHtml(m.source_url)}</div>
+        </div>
+        <div>
+          <span class="similar-distance ${cls}">${label}</span>
+          <button class="btn-sm" style="margin-left:4px;" onclick="openSimilarProfile(${JSON.stringify(m.profile_id)})">Open</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    root.innerHTML = `<div class="dlg-err">${escHtml(e.message)}</div>`;
+  }
+}
+
+function openSimilarProfile(id) {
+  closeDialog('similarDialog');
+  // Profiles dialog may not be open yet — open it, then select.
+  const profilesDlg = document.getElementById('profilesDialog');
+  if (!profilesDlg.open) {
+    openProfilesDialog().then(() => selectProfile(id));
+  } else {
+    selectProfile(id);
+  }
 }
 
 async function confirmDeleteProfile() {

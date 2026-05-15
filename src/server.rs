@@ -80,6 +80,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/profiles/:id", axum::routing::delete(profile_delete_handler))
         .route("/api/profiles/:id/note", post(profile_note_handler))
         .route("/api/media/:id", get(media_get_handler))
+        .route("/api/media/:id/similar", get(media_similar_handler))
         .route("/api/review/pending", get(review_pending_handler))
         .route("/api/review/count", get(review_count_handler))
         .route("/api/review/:id/accept", post(review_accept_handler))
@@ -624,6 +625,11 @@ async fn fetch_and_store_avatar(
     if bytes.len() > MAX_BYTES {
         anyhow::bail!("avatar too large ({} bytes)", bytes.len());
     }
+    let bytes_vec = bytes.to_vec();
+    // pHash is best-effort — a failure to compute (corrupt bytes, unusual
+    // format) leaves the row with phash=NULL but the bytes are still stored
+    // and served by /api/media/:id.
+    let phash = crate::vault::compute_phash_hex(&bytes_vec);
     crate::vault::record_media(
         vault,
         profile_id,
@@ -631,7 +637,8 @@ async fn fetch_and_store_avatar(
         url,
         "avatar",
         &mime,
-        bytes.to_vec(),
+        bytes_vec,
+        phash,
     )
     .await?;
     Ok(())
@@ -840,6 +847,42 @@ async fn profile_delete_handler(
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "profile not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+#[derive(Deserialize)]
+struct SimilarQuery {
+    /// Hamming-distance cap (over the 64-bit phash). Default 8 — covers
+    /// re-encodes, mild scaling, and watermark overlays without flooding
+    /// the result list. Server-side clamped to [0, 32].
+    #[serde(default)]
+    max_distance: Option<u32>,
+}
+
+#[cfg(feature = "vault")]
+async fn media_similar_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Query(q): Query<SimilarQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.vault.is_locked().await {
+        return vault_locked_response();
+    }
+    let max_distance = q.max_distance.unwrap_or(8).min(32);
+    match crate::vault::find_similar_by_phash(&state.vault, id, max_distance).await {
+        Ok(hits) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "seed_id":      id,
+                "max_distance": max_distance,
+                "matches":      hits,
+            })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
