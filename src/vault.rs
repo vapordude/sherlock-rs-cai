@@ -18,8 +18,10 @@
 //!     `lock()` drops the connection and zeroizes the key.
 
 #![cfg(feature = "vault")]
-// Consumed by `server.rs` in the next commit (vault endpoints + AppState
-// integration). Module is internally consistent and unit-tested here.
+// A handful of small helpers (`audit`, `format_age`, and a couple of
+// constants used only by the schema string) are not yet wired through
+// public APIs but are part of the module's internal contract for the
+// next commit which adds evidence-write endpoints.
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};

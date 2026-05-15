@@ -4,6 +4,8 @@ use crate::result::{QueryResult, QueryStatus};
 use crate::sites::{self, SiteData};
 use axum::extract::{Query, State};
 use axum::http::header;
+#[cfg(feature = "vault")]
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -14,8 +16,17 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::limit::RequestBodyLimitLayer;
+
+#[cfg(feature = "vault")]
+use crate::vault::VaultState;
 
 const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
+
+/// Maximum body size for any POST payload. Default axum cap is 2 MiB which
+/// is too tight for vault-aware exports and bulk-note imports — 10 MiB is
+/// a generous floor without inviting DoS.
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Shared application state orchestrating in-memory caching across Axum handlers.
 ///
@@ -25,6 +36,8 @@ const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 pub struct AppState {
     pub sites: RwLock<Option<Arc<HashMap<String, SiteData>>>>,
     pub load_error: RwLock<Option<String>>,
+    #[cfg(feature = "vault")]
+    pub vault: Arc<VaultState>,
 }
 
 impl AppState {
@@ -33,19 +46,38 @@ impl AppState {
         Self {
             sites: RwLock::new(None),
             load_error: RwLock::new(None),
+            #[cfg(feature = "vault")]
+            vault: VaultState::new(&data_dir_for_vault()),
         }
     }
 }
 
+#[cfg(feature = "vault")]
+fn data_dir_for_vault() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("sherlock-rs")
+}
+
 /// Configures and yields the application's root Axum router binding core application endpoints to underlying handlers.
 pub fn create_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(index_handler))
         .route("/api/status", get(status_handler))
         .route("/api/search", get(search_handler))
         .route("/api/export/csv", post(export_csv_handler))
         .route("/api/export/txt", post(export_txt_handler))
-        .route("/api/update-db", post(update_db_handler))
+        .route("/api/update-db", post(update_db_handler));
+
+    #[cfg(feature = "vault")]
+    let router = router
+        .route("/api/vault/status", get(vault_status_handler))
+        .route("/api/vault/init", post(vault_init_handler))
+        .route("/api/vault/unlock", post(vault_unlock_handler))
+        .route("/api/vault/lock", post(vault_lock_handler));
+
+    router
+        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
         .with_state(state)
 }
 
@@ -318,5 +350,87 @@ async fn update_db_handler(State(state): State<Arc<AppState>>) -> Json<UpdateRes
             sites_count: 0,
             error: Some(e.to_string()),
         }),
+    }
+}
+
+// ── Vault endpoints ──────────────────────────────────────────────────────────
+// Gated behind the `vault` feature so a `--no-default-features` build doesn't
+// pull in SQLCipher. The frontend feature-detects these via /api/vault/status.
+
+#[cfg(feature = "vault")]
+#[derive(Deserialize)]
+struct PassphraseBody {
+    passphrase: String,
+}
+
+#[cfg(feature = "vault")]
+async fn vault_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let status = state.vault.status().await;
+    Json(status)
+}
+
+#[cfg(feature = "vault")]
+async fn vault_init_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PassphraseBody>,
+) -> impl IntoResponse {
+    if body.passphrase.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "passphrase must be at least 8 characters",
+                "recovery": "none — there is no passphrase recovery; choose carefully"
+            })),
+        );
+    }
+    match state.vault.init(&body.passphrase).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "warning": "Forgetting this passphrase means permanent data loss. There is no recovery."
+            })),
+        ),
+        Err(e) if e.to_string().contains("already initialized") => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "vault already initialized"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+async fn vault_unlock_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PassphraseBody>,
+) -> impl IntoResponse {
+    match state.vault.unlock(&body.passphrase).await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Err(e) if e.to_string().contains("wrong passphrase") => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "wrong passphrase"})),
+        ),
+        Err(e) if e.to_string().contains("not initialized") => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "vault not initialized"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+async fn vault_lock_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.vault.lock().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"ok": true}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
     }
 }

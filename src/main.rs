@@ -40,6 +40,24 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Idle auto-lock: tick every 60s; if the vault has been idle past its
+    // configured timeout (default 30 min) the key + connection are dropped
+    // and the user must re-enter the passphrase.
+    #[cfg(feature = "vault")]
+    {
+        let vault = state.vault.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                if vault.maybe_auto_lock().await {
+                    eprintln!("  \x1b[90m vault auto-locked (idle)\x1b[0m");
+                }
+            }
+        });
+    }
+
     // Start server
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
