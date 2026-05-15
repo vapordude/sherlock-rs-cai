@@ -62,15 +62,32 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
 
-    println!("  \x1b[32m Server:  http://127.0.0.1:{}\x1b[0m", port);
+    let url = format!("http://127.0.0.1:{}", port);
+    println!("  \x1b[32m Server:  {url}\x1b[0m");
     println!("  \x1b[90m Press Ctrl+C to stop\x1b[0m");
+    #[cfg(target_os = "android")]
+    println!("  \x1b[33m ↑ Open this URL in Chrome / Firefox on your phone ↑\x1b[0m");
     println!();
 
-    // Open browser
-    let _ = open::that(format!("http://127.0.0.1:{}", port));
+    // Open browser. On Android (Termux) `xdg-open` doesn't exist, so we
+    // route through `termux-open-url` from the optional `termux-api`
+    // package. Failure is non-fatal — the URL above is already printed.
+    open_browser(&url);
 
     let app = server::create_router(state);
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn open_browser(url: &str) {
+    let _ = std::process::Command::new("termux-open-url")
+        .arg(url)
+        .status();
+}
+
+#[cfg(not(target_os = "android"))]
+fn open_browser(url: &str) {
+    let _ = open::that(url);
 }
