@@ -1,7 +1,6 @@
 use crate::result::{QueryResult, QueryStatus};
 use crate::sites::SiteData;
 use rand::seq::SliceRandom;
-use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -121,22 +120,20 @@ pub async fn check_username(
             continue;
         }
 
-        if let Some(regex_str) = &site.regex_check {
-            if let Ok(re) = Regex::new(regex_str) {
-                if !re.is_match(username) {
-                    let _ = result_tx
-                        .send(QueryResult {
-                            username: username.to_string(),
-                            site_name: name.clone(),
-                            url_main: site.url_main.clone(),
-                            site_url: site.format_url(username),
-                            status: QueryStatus::Illegal,
-                            response_time_ms: None,
-                            context: Some("Invalid username format for this site".into()),
-                        })
-                        .await;
-                    continue;
-                }
+        if let Some(re) = &site.compiled_regex {
+            if !re.is_match(username) {
+                let _ = result_tx
+                    .send(QueryResult {
+                        username: username.to_string(),
+                        site_name: name.clone(),
+                        url_main: site.url_main.clone(),
+                        site_url: site.format_url(username),
+                        status: QueryStatus::Illegal,
+                        response_time_ms: None,
+                        context: Some("Invalid username format for this site".into()),
+                    })
+                    .await;
+                continue;
             }
         }
 
