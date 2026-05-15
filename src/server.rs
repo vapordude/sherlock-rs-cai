@@ -81,6 +81,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/profiles/:id/note", post(profile_note_handler))
         .route("/api/media/:id", get(media_get_handler))
         .route("/api/media/:id/similar", get(media_similar_handler))
+        .route("/api/media/:id/similar_v2", get(media_similar_v2_handler))
         .route("/api/review/pending", get(review_pending_handler))
         .route("/api/review/count", get(review_count_handler))
         .route("/api/review/:id/accept", post(review_accept_handler))
@@ -626,10 +627,11 @@ async fn fetch_and_store_avatar(
         anyhow::bail!("avatar too large ({} bytes)", bytes.len());
     }
     let bytes_vec = bytes.to_vec();
-    // pHash is best-effort — a failure to compute (corrupt bytes, unusual
-    // format) leaves the row with phash=NULL but the bytes are still stored
-    // and served by /api/media/:id.
+    // Both fingerprints are best-effort — a failure to compute (corrupt
+    // bytes, unusual format) leaves the column NULL but the bytes are
+    // still stored and served by /api/media/:id.
     let phash = crate::vault::compute_phash_hex(&bytes_vec);
+    let composite = crate::vault::compute_composite_fingerprint(&bytes_vec);
     crate::vault::record_media(
         vault,
         profile_id,
@@ -639,6 +641,7 @@ async fn fetch_and_store_avatar(
         &mime,
         bytes_vec,
         phash,
+        composite,
     )
     .await?;
     Ok(())
@@ -882,6 +885,43 @@ async fn media_similar_handler(
                 "seed_id":      id,
                 "max_distance": max_distance,
                 "matches":      hits,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[cfg(feature = "vault")]
+#[derive(Deserialize)]
+struct SimilarV2Query {
+    /// Hamming-distance cap over the 256+-bit composite fingerprint.
+    /// Default 32 (≈12% of 256-bit space — the typical "near duplicate"
+    /// line). Server-side clamped to [0, 128].
+    #[serde(default)]
+    max_distance: Option<u32>,
+}
+
+#[cfg(feature = "vault")]
+async fn media_similar_v2_handler(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Query(q): Query<SimilarV2Query>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if state.vault.is_locked().await {
+        return vault_locked_response();
+    }
+    let max_distance = q.max_distance.unwrap_or(32).min(128);
+    match crate::vault::find_similar_by_composite(&state.vault, id, max_distance).await {
+        Ok(hits) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "seed_id":      id,
+                "max_distance": max_distance,
+                "matches":      hits,
+                "method":       "composite_256bit",
             })),
         ),
         Err(e) => (

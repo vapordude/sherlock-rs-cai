@@ -774,15 +774,23 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 </dialog>
 
 <!-- ── Similar-media dialog ─────────────────────────────────── -->
-<dialog id="similarDialog" class="app-dialog" style="min-width:560px;">
+<dialog id="similarDialog" class="app-dialog" style="min-width:600px;">
   <div class="dlg-body">
     <div class="dlg-title">Similar avatars</div>
-    <div class="dlg-sub" id="similarSub">Profiles whose stored avatar matches this one by perceptual hash. Lower Hamming distance = stronger match.</div>
-    <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-      <span style="font-size:.78rem; color:var(--text-muted);">Max distance</span>
-      <input type="range" id="similarMaxDistance" min="0" max="32" step="1" value="8" oninput="paintSimilarDistanceLabel()" style="width:140px;">
-      <span id="similarMaxDistanceLabel" style="color:var(--accent); min-width:24px;">8</span>
+    <div class="dlg-sub" id="similarSub">Profiles whose stored avatar matches this one. Lower Hamming distance = stronger match.</div>
+    <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
+      <span style="font-size:.78rem; color:var(--text-muted);">Method</span>
+      <select id="similarMethod" onchange="onSimilarMethodChange()" style="background:var(--bg-deep); border:1px solid var(--bg-card); color:var(--text); border-radius:6px; padding:4px 8px;">
+        <option value="phash">pHash (64-bit, fast)</option>
+        <option value="composite" selected>Composite (256-bit, deeper)</option>
+      </select>
+      <span style="font-size:.78rem; color:var(--text-muted); margin-left:8px;">Max distance</span>
+      <input type="range" id="similarMaxDistance" min="0" max="64" step="1" value="32" oninput="paintSimilarDistanceLabel()" style="width:140px;">
+      <span id="similarMaxDistanceLabel" style="color:var(--accent); min-width:24px;">32</span>
       <button class="btn-sm" onclick="refreshSimilar()">Refresh</button>
+    </div>
+    <div style="font-size:.7rem; color:var(--text-muted); margin-bottom:10px;" id="similarMethodHint">
+      Composite mode uses a 256+-bit fingerprint that catches subtle crops, hue shifts, and larger edits the 64-bit pHash misses.
     </div>
     <div id="similarList" style="max-height:50vh; overflow:auto;"></div>
     <div class="dlg-row">
@@ -1019,13 +1027,31 @@ async function findSimilarMedia(id) {
   await refreshSimilar();
 }
 
+function onSimilarMethodChange() {
+  const method = document.getElementById('similarMethod').value;
+  const slider = document.getElementById('similarMaxDistance');
+  const hint   = document.getElementById('similarMethodHint');
+  if (method === 'composite') {
+    slider.max = 128;
+    if (parseInt(slider.value, 10) < 16) slider.value = 32;
+    hint.textContent = 'Composite mode uses a 256+-bit fingerprint that catches subtle crops, hue shifts, and larger edits the 64-bit pHash misses.';
+  } else {
+    slider.max = 32;
+    if (parseInt(slider.value, 10) > 32) slider.value = 8;
+    hint.textContent = 'pHash mode uses a 64-bit DCT-style fingerprint — faster, catches re-encodes and watermarks. Use for "is this the same image."';
+  }
+  paintSimilarDistanceLabel();
+}
+
 async function refreshSimilar() {
   if (similarSeedId == null) return;
-  const dist = document.getElementById('similarMaxDistance').value;
-  const root = document.getElementById('similarList');
+  const method = document.getElementById('similarMethod').value;
+  const dist   = document.getElementById('similarMaxDistance').value;
+  const path   = method === 'composite' ? 'similar_v2' : 'similar';
+  const root   = document.getElementById('similarList');
   root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
   try {
-    const res = await fetch(`/api/media/${similarSeedId}/similar?max_distance=${encodeURIComponent(dist)}`);
+    const res = await fetch(`/api/media/${similarSeedId}/${path}?max_distance=${encodeURIComponent(dist)}`);
     if (!res.ok) {
       root.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
       return;
@@ -1036,9 +1062,13 @@ async function refreshSimilar() {
       root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="icon">&#x2713;</div><p>No similar avatars within distance ' + dist + '.</p></div>';
       return;
     }
+    // Color-coding thresholds scale with bit-width.
+    const bitWidth = matches[0].bit_width || 64;
+    const exact = Math.max(2, Math.round(bitWidth * 0.03));
+    const near  = Math.max(10, Math.round(bitWidth * 0.15));
     root.innerHTML = matches.map(m => {
       const d  = m.hamming_distance;
-      const cls = d <= 2 ? 'exact' : d <= 10 ? 'near' : 'weak';
+      const cls = d <= exact ? 'exact' : d <= near ? 'near' : 'weak';
       const label = (d === 0 ? '0 — identical' : d + ' bits');
       return `<div class="similar-result-row">
         <img src="/api/media/${m.id}" alt="" onerror="this.style.display='none'">
