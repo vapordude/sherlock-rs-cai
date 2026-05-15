@@ -17,10 +17,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 const FRONTEND_HTML: &str = include_str!("../frontend/index.html");
 
-/// Shared application state orchestrating in-memory caching and export contexts across Axum handlers.
+/// Shared application state orchestrating in-memory caching across Axum handlers.
+///
+/// Per-request scan results are *not* held here — exports are stateless and
+/// receive the result set from the client over a POST body, so concurrent
+/// users never collide on a shared `last_results` vector.
 pub struct AppState {
     pub sites: RwLock<Option<Arc<HashMap<String, SiteData>>>>,
-    pub last_results: RwLock<Vec<QueryResult>>,
     pub load_error: RwLock<Option<String>>,
 }
 
@@ -29,7 +32,6 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             sites: RwLock::new(None),
-            last_results: RwLock::new(Vec::new()),
             load_error: RwLock::new(None),
         }
     }
@@ -41,8 +43,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/", get(index_handler))
         .route("/api/status", get(status_handler))
         .route("/api/search", get(search_handler))
-        .route("/api/export/csv", get(export_csv_handler))
-        .route("/api/export/txt", get(export_txt_handler))
+        .route("/api/export/csv", post(export_csv_handler))
+        .route("/api/export/txt", post(export_txt_handler))
         .route("/api/update-db", post(update_db_handler))
         .with_state(state)
 }
@@ -127,9 +129,6 @@ async fn search_handler(
     let timeout_secs = params.timeout.unwrap_or(30);
     let proxy = params.proxy.clone();
 
-    // Clear previous results
-    state.last_results.write().await.clear();
-
     tokio::spawn(async move {
         for username in &usernames {
             // ── username_start ────────────────────────────────────────────────
@@ -176,16 +175,14 @@ async fn search_handler(
 
                 let event_data = SseResultData {
                     username: username.clone(),
-                    site_name: result.site_name.clone(),
-                    url_main: result.url_main.clone(),
-                    site_url: result.site_url.clone(),
+                    site_name: result.site_name,
+                    url_main: result.url_main,
+                    site_url: result.site_url,
                     status: result.status.as_str().to_string(),
                     response_time_ms: result.response_time_ms,
                     checked,
                     total,
                 };
-
-                state.last_results.write().await.push(result);
 
                 let json = serde_json::to_string(&event_data).unwrap_or_default();
                 if sse_tx
@@ -217,18 +214,9 @@ async fn search_handler(
         }
 
         // ── Overall done ──────────────────────────────────────────────────────
-        let total_found = state
-            .last_results
-            .read()
-            .await
-            .iter()
-            .filter(|r| r.status == QueryStatus::Claimed)
-            .count();
-
         let _ = sse_tx
             .send(Ok(Event::default().event("done").data(
                 serde_json::to_string(&serde_json::json!({
-                    "total_found": total_found,
                     "total_usernames": usernames.len(),
                 }))
                 .unwrap_or_default(),
@@ -239,9 +227,9 @@ async fn search_handler(
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())
 }
 
-/// Formats a complete scan dataset originating from the cache into CSV.
-async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+/// Formats a client-supplied result set into CSV. Stateless: the caller POSTs
+/// the rows it wants exported, so concurrent users never share a buffer.
+async fn export_csv_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let csv_data = export::to_csv(&results);
     (
         [
@@ -255,9 +243,9 @@ async fn export_csv_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 }
 
-/// Formats a complete scan dataset originating from the cache into standard TXT.
-async fn export_txt_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let results = state.last_results.read().await;
+/// Formats a client-supplied result set into a human-readable text report.
+/// Stateless — see `export_csv_handler`.
+async fn export_txt_handler(Json(results): Json<Vec<QueryResult>>) -> impl IntoResponse {
     let txt_data = export::to_txt(&results);
     (
         [
