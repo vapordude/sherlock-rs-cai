@@ -331,15 +331,119 @@ body::before {
 @keyframes toastIn  { from{opacity:0;transform:translateY(20px)} to{opacity:1;transform:none} }
 @keyframes toastOut { from{opacity:1} to{opacity:0} }
 
-/* ── Top-right update button ────────────────────────────────── */
-.update-btn {
+/* ── Top-right buttons ──────────────────────────────────────── */
+.top-bar {
   position: fixed; top: 16px; right: 20px;
+  display: flex; gap: 8px; z-index: 100;
+}
+.update-btn {
   padding: 8px 16px;
   background: var(--bg-surface); border: 1px solid var(--bg-card);
   color: var(--text-dim); border-radius: 8px; font-size: .8rem;
-  cursor: pointer; transition: all .2s; z-index: 100;
+  cursor: pointer; transition: all .2s;
 }
 .update-btn:hover { border-color: var(--accent); color: var(--accent); }
+.vault-pill {
+  padding: 8px 14px;
+  background: var(--bg-surface); border: 1px solid var(--bg-card);
+  border-radius: 8px; font-size: .8rem; cursor: pointer;
+  display: flex; align-items: center; gap: 6px; transition: all .2s;
+}
+.vault-pill.locked   { color: var(--red);   border-color: rgba(239,68,68,.4); }
+.vault-pill.unlocked { color: #4ade80;      border-color: rgba(74,222,128,.4); }
+.vault-pill.uninit   { color: var(--amber); border-color: rgba(245,158,11,.4); }
+.vault-pill:hover    { background: var(--bg-card); }
+.review-pill {
+  padding: 8px 14px;
+  background: var(--bg-surface); border: 1px solid rgba(124,58,237,.4);
+  color: #a78bfa; border-radius: 8px; font-size: .8rem; cursor: pointer;
+  display: none; align-items: center; gap: 6px; transition: all .2s;
+}
+.review-pill.has-pending { display: flex; }
+.review-pill:hover { background: var(--bg-card); }
+
+/* ── Dialogs ────────────────────────────────────────────────── */
+dialog.app-dialog {
+  border: 1px solid var(--bg-card); border-radius: 12px;
+  background: var(--bg-surface); color: var(--text-dim);
+  padding: 0; min-width: 380px; max-width: 92vw;
+  box-shadow: 0 8px 40px rgba(0,0,0,.6);
+}
+dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
+.dlg-body { padding: 24px; }
+.dlg-title { font-size: 1.05rem; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.dlg-sub   { font-size: .82rem; color: var(--text-muted); margin-bottom: 16px; }
+.dlg-warn  {
+  background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.3);
+  color: var(--red); padding: 10px 12px; border-radius: 8px;
+  font-size: .78rem; margin: 12px 0;
+}
+.dlg-input {
+  width: 100%; padding: 10px 12px; background: var(--bg-deep);
+  border: 1px solid var(--bg-card); border-radius: 8px;
+  color: var(--text); font-size: .9rem; box-sizing: border-box;
+  margin-bottom: 10px;
+}
+.dlg-input:focus { outline: none; border-color: var(--accent); }
+.dlg-row {
+  display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px;
+}
+.dlg-err { color: var(--red); font-size: .8rem; min-height: 1em; margin-top: 6px; }
+
+.pending-card {
+  background: var(--bg-deep); border: 1px solid var(--bg-card);
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+}
+.pending-kind {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: .7rem; letter-spacing: .5px; text-transform: uppercase;
+  background: rgba(124,58,237,.15); color: #a78bfa; margin-right: 8px;
+}
+.pending-score {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: .7rem; background: var(--bg-card); color: var(--text-muted);
+}
+.pending-rationale { font-size: .85rem; color: var(--text-dim); margin: 6px 0; }
+.pending-actions { display: flex; gap: 6px; margin-top: 8px; }
+.btn-accept {
+  padding: 6px 14px; background: rgba(74,222,128,.15);
+  border: 1px solid rgba(74,222,128,.4); color: #4ade80;
+  border-radius: 6px; font-size: .8rem; cursor: pointer;
+}
+.btn-reject {
+  padding: 6px 14px; background: rgba(239,68,68,.1);
+  border: 1px solid rgba(239,68,68,.4); color: var(--red);
+  border-radius: 6px; font-size: .8rem; cursor: pointer;
+}
+
+/* ── Confidence pill + extracted-fields drawer on result rows ── */
+.result-row { cursor: default; }
+.result-row.has-extracted { cursor: pointer; }
+.confidence-pill {
+  display: inline-block; padding: 2px 7px; border-radius: 4px;
+  font-size: .68rem; background: var(--bg-card); color: var(--text-muted);
+  margin-left: 6px;
+}
+.confidence-pill.high { background: rgba(74,222,128,.12); color: #4ade80; }
+.confidence-pill.med  { background: rgba(245,158,11,.12); color: var(--amber); }
+.confidence-pill.low  { background: rgba(239,68,68,.12); color: var(--red); }
+.extracted-panel {
+  grid-column: 1 / -1;
+  background: rgba(0,0,0,.2); border-radius: 6px;
+  padding: 8px 12px; margin-top: 6px;
+  font-size: .78rem; color: var(--text-muted);
+  display: none;
+}
+.result-row.expanded .extracted-panel { display: block; }
+.extracted-panel dt { color: var(--accent-dim); display: inline; font-weight: 600; margin-right: 4px; }
+.extracted-panel dd { display: inline; margin: 0 12px 0 0; color: var(--text-dim); }
+
+.vault-banner {
+  background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.3);
+  color: var(--amber); padding: 8px 12px; border-radius: 8px;
+  font-size: .8rem; margin: 8px 0; display: none;
+}
+.vault-banner.show { display: block; }
 
 /* ── Footer ─────────────────────────────────────────────────── */
 .footer {
@@ -369,7 +473,15 @@ body::before {
 </head>
 <body>
 
-<button class="update-btn" id="updateBtn" onclick="updateDb()">&#x21bb; Update DB</button>
+<div class="top-bar">
+  <button class="review-pill" id="reviewPill" onclick="openReviewDialog()" title="Pending reviews">
+    &#x1f4cb; <span id="reviewCount">0</span> pending
+  </button>
+  <button class="vault-pill uninit" id="vaultPill" onclick="openVaultDialog()" title="Vault">
+    &#x1f512; <span id="vaultPillLabel">Vault</span>
+  </button>
+  <button class="update-btn" id="updateBtn" onclick="updateDb()">&#x21bb; Update DB</button>
+</div>
 
 <div class="container">
 
@@ -454,7 +566,18 @@ body::before {
         <span>Proxy</span>
         <input type="text" id="proxy" placeholder="socks5://127.0.0.1:9050">
       </label>
+      <label class="option-group" title="Persist hits to your encrypted vault for cross-scan correlation">
+        <span>Save to vault</span>
+        <label class="toggle"><input type="checkbox" id="saveEvidence" onchange="syncAutoAccept()"><span class="slider"></span></label>
+      </label>
+      <label class="option-group" title="Auto-apply high-confidence (≥80%) merge proposals; lower-confidence ones still queue for review">
+        <span>Auto-accept</span>
+        <label class="toggle"><input type="checkbox" id="autoAccept" disabled><span class="slider"></span></label>
+      </label>
       <span class="option-group" id="sitesCount" style="margin-left:auto; color:var(--accent);"></span>
+    </div>
+    <div class="vault-banner" id="vaultBanner">
+      &#x1f512; Vault is locked — hits won't be saved. Unlock to enable persistence.
     </div>
   </div>
 
@@ -512,6 +635,63 @@ body::before {
 
 </div><!-- /container -->
 
+<!-- ── Vault init dialog ─────────────────────────────────────── -->
+<dialog id="vaultInitDialog" class="app-dialog">
+  <div class="dlg-body">
+    <div class="dlg-title">Create encrypted vault</div>
+    <div class="dlg-sub">Choose a passphrase. It encrypts every persisted profile and is never stored.</div>
+    <div class="dlg-warn">
+      &#x26a0; Forgetting this passphrase means permanent data loss. There is <strong>no recovery</strong>. If you don't need persistence, you can dismiss this dialog and continue searching without a vault.
+    </div>
+    <input type="password" class="dlg-input" id="initPw1" placeholder="Passphrase (min 8 chars)" autocomplete="new-password">
+    <input type="password" class="dlg-input" id="initPw2" placeholder="Confirm passphrase" autocomplete="new-password">
+    <div class="dlg-err" id="initErr"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="closeDialog('vaultInitDialog')">Skip</button>
+      <button class="btn btn-primary" onclick="submitVaultInit()">Create vault</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- ── Vault unlock dialog ──────────────────────────────────── -->
+<dialog id="vaultUnlockDialog" class="app-dialog">
+  <div class="dlg-body">
+    <div class="dlg-title">Unlock vault</div>
+    <div class="dlg-sub">Enter the passphrase you used to initialize the vault.</div>
+    <input type="password" class="dlg-input" id="unlockPw" placeholder="Passphrase" autocomplete="current-password">
+    <div class="dlg-err" id="unlockErr"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="closeDialog('vaultUnlockDialog')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitVaultUnlock()">Unlock</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- ── Pending-review dialog ────────────────────────────────── -->
+<dialog id="reviewDialog" class="app-dialog" style="min-width:520px;">
+  <div class="dlg-body">
+    <div class="dlg-title">Pending review</div>
+    <div class="dlg-sub" id="reviewSub">Review each proposed accumulation or cross-site correlation.</div>
+    <div id="reviewList" style="max-height:60vh; overflow:auto;"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="acceptAllPending()">Accept all visible</button>
+      <button class="btn-sm" onclick="closeDialog('reviewDialog')">Close</button>
+    </div>
+  </div>
+</dialog>
+
+<!-- ── Profiles dialog ──────────────────────────────────────── -->
+<dialog id="profilesDialog" class="app-dialog" style="min-width:520px;">
+  <div class="dlg-body">
+    <div class="dlg-title">Profiles</div>
+    <div class="dlg-sub" id="profilesSub">Accumulated evidence per profile.</div>
+    <div id="profilesList" style="max-height:60vh; overflow:auto;"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="closeDialog('profilesDialog')">Close</button>
+    </div>
+  </div>
+</dialog>
+
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 // tabState[username] = { results:[], found:0, errors:0, waf:0, checked:0, total:0, done:false }
@@ -543,6 +723,192 @@ async function checkStatus() {
   } catch { setTimeout(checkStatus, 1000); }
 }
 checkStatus();
+
+// ── Vault bootstrap + lifecycle ───────────────────────────────────────────────
+let vaultState = { initialized: false, locked: true };
+
+async function checkVault() {
+  try {
+    const res = await fetch('/api/vault/status');
+    if (!res.ok) return; // vault feature off — leave defaults; pill stays 'uninit'
+    vaultState = await res.json();
+    paintVault();
+    if (!vaultState.initialized) {
+      // First-run nudge — don't auto-open the dialog on every page load;
+      // make the pill blink instead via the .uninit class so the user
+      // discovers it when they're ready.
+    }
+    refreshReviewBadge();
+  } catch { /* offline, no vault */ }
+}
+
+function paintVault() {
+  const pill  = document.getElementById('vaultPill');
+  const label = document.getElementById('vaultPillLabel');
+  const banner = document.getElementById('vaultBanner');
+  pill.classList.remove('locked','unlocked','uninit');
+  if (!vaultState.initialized) {
+    pill.classList.add('uninit'); label.textContent = 'Set up vault';
+  } else if (vaultState.locked) {
+    pill.classList.add('locked'); label.textContent = 'Unlock vault';
+  } else {
+    pill.classList.add('unlocked'); label.textContent = 'Vault unlocked';
+  }
+  // Save-to-vault toggle banner: only show when save is enabled but vault is unusable.
+  const save = document.getElementById('saveEvidence');
+  const usable = vaultState.initialized && !vaultState.locked;
+  if (save && save.checked && !usable) banner.classList.add('show');
+  else                                  banner.classList.remove('show');
+  syncAutoAccept();
+}
+
+function openVaultDialog() {
+  if (!vaultState.initialized)      showDialog('vaultInitDialog', () => document.getElementById('initPw1').focus());
+  else if (vaultState.locked)       showDialog('vaultUnlockDialog', () => document.getElementById('unlockPw').focus());
+  else if (confirm('Lock the vault now? Pending evidence writes for the current scan will be skipped.')) {
+    fetch('/api/vault/lock', { method: 'POST' }).then(checkVault);
+  }
+}
+
+function showDialog(id, after) {
+  const d = document.getElementById(id);
+  d.showModal();
+  if (after) after();
+}
+function closeDialog(id) {
+  document.getElementById(id).close();
+}
+
+async function submitVaultInit() {
+  const pw1 = document.getElementById('initPw1').value;
+  const pw2 = document.getElementById('initPw2').value;
+  const err = document.getElementById('initErr');
+  err.textContent = '';
+  if (pw1.length < 8)   { err.textContent = 'Passphrase must be at least 8 characters.'; return; }
+  if (pw1 !== pw2)      { err.textContent = "Passphrases don't match.";                  return; }
+  try {
+    const res = await fetch('/api/vault/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase: pw1 })
+    });
+    const data = await res.json();
+    if (!res.ok) { err.textContent = data.error || ('HTTP ' + res.status); return; }
+    closeDialog('vaultInitDialog');
+    document.getElementById('initPw1').value = '';
+    document.getElementById('initPw2').value = '';
+    showToast('Vault created — keep your passphrase safe.');
+    await checkVault();
+  } catch (e) { err.textContent = 'Network error: ' + e.message; }
+}
+
+async function submitVaultUnlock() {
+  const pw  = document.getElementById('unlockPw').value;
+  const err = document.getElementById('unlockErr');
+  err.textContent = '';
+  if (!pw)              { err.textContent = 'Passphrase required.'; return; }
+  try {
+    const res = await fetch('/api/vault/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passphrase: pw })
+    });
+    const data = await res.json();
+    if (res.status === 401) { err.textContent = 'Wrong passphrase.'; return; }
+    if (!res.ok)            { err.textContent = data.error || ('HTTP ' + res.status); return; }
+    closeDialog('vaultUnlockDialog');
+    document.getElementById('unlockPw').value = '';
+    showToast('Vault unlocked.');
+    await checkVault();
+  } catch (e) { err.textContent = 'Network error: ' + e.message; }
+}
+
+function syncAutoAccept() {
+  const save  = document.getElementById('saveEvidence');
+  const auto  = document.getElementById('autoAccept');
+  const usable = vaultState.initialized && !vaultState.locked;
+  // Auto-accept only makes sense when we're actually saving.
+  auto.disabled = !(save.checked && usable);
+  if (!save.checked || !usable) auto.checked = false;
+  paintBannerVisibility();
+}
+function paintBannerVisibility() {
+  const save = document.getElementById('saveEvidence');
+  const banner = document.getElementById('vaultBanner');
+  const usable = vaultState.initialized && !vaultState.locked;
+  if (save && save.checked && !usable) banner.classList.add('show');
+  else                                  banner.classList.remove('show');
+}
+
+// ── Pending review badge + dialog ─────────────────────────────────────────────
+async function refreshReviewBadge() {
+  try {
+    const res  = await fetch('/api/review/count');
+    if (!res.ok) return;
+    const data = await res.json();
+    const pill = document.getElementById('reviewPill');
+    const cnt  = document.getElementById('reviewCount');
+    cnt.textContent = data.count;
+    if (data.count > 0) pill.classList.add('has-pending');
+    else                pill.classList.remove('has-pending');
+  } catch { /* ignore */ }
+}
+
+async function openReviewDialog() {
+  if (vaultState.locked) { openVaultDialog(); return; }
+  showDialog('reviewDialog');
+  try {
+    const res  = await fetch('/api/review/pending');
+    const data = await res.json();
+    renderReviewList(data.pending || []);
+  } catch (e) {
+    document.getElementById('reviewList').innerHTML =
+      `<div class="dlg-err">Failed to load: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderReviewList(items) {
+  const root = document.getElementById('reviewList');
+  if (items.length === 0) {
+    root.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x2713;</div><p>No pending reviews.</p></div>';
+    return;
+  }
+  root.innerHTML = items.map(p => `
+    <div class="pending-card" data-id="${p.id}">
+      <div>
+        <span class="pending-kind">${escHtml(p.kind)}</span>
+        <span class="pending-score">score ${(p.score*100).toFixed(0)}%</span>
+      </div>
+      <div class="pending-rationale">${escHtml(p.rationale)}</div>
+      <div class="pending-actions">
+        <button class="btn-accept" onclick="reviewAction(${p.id}, 'accept')">Accept</button>
+        <button class="btn-reject" onclick="reviewAction(${p.id}, 'reject')">Reject</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function reviewAction(id, kind) {
+  try {
+    const res = await fetch(`/api/review/${id}/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!res.ok) { showToast(`${kind} failed: HTTP ${res.status}`); return; }
+    // Remove the card from the list.
+    const card = document.querySelector(`.pending-card[data-id="${id}"]`);
+    if (card) card.remove();
+    refreshReviewBadge();
+  } catch (e) { showToast(kind + ' failed: ' + e.message); }
+}
+
+async function acceptAllPending() {
+  const cards = Array.from(document.querySelectorAll('.pending-card'));
+  for (const c of cards) {
+    const id = c.dataset.id;
+    if (id) await reviewAction(parseInt(id, 10), 'accept');
+  }
+}
+
+// Bootstrap vault
+checkVault();
 
 // ── Parse usernames ───────────────────────────────────────────────────────────
 function parseUsernames(text) {
@@ -582,11 +948,15 @@ function startSearch() {
   switchTab(usernames[0]);
 
   // Build SSE URL
-  const timeout = document.getElementById('timeout').value || 30;
-  const nsfw    = document.getElementById('nsfw').checked;
-  const proxy   = document.getElementById('proxy').value.trim();
+  const timeout       = document.getElementById('timeout').value || 30;
+  const nsfw          = document.getElementById('nsfw').checked;
+  const proxy         = document.getElementById('proxy').value.trim();
+  const saveEvidence  = document.getElementById('saveEvidence').checked;
+  const autoAccept    = document.getElementById('autoAccept').checked;
   let url = `/api/search?usernames=${encodeURIComponent(usernames.join('\n'))}&timeout=${timeout}&nsfw=${nsfw}`;
-  if (proxy) url += `&proxy=${encodeURIComponent(proxy)}`;
+  if (proxy)        url += `&proxy=${encodeURIComponent(proxy)}`;
+  if (saveEvidence) url += `&save_evidence=true`;
+  if (autoAccept)   url += `&auto_accept=true`;
 
   eventSource = new EventSource(url);
 
@@ -630,7 +1000,20 @@ function startSearch() {
     if (tab) tab.classList.remove('tab-searching');
   });
 
-  eventSource.addEventListener('done', () => searchComplete());
+  eventSource.addEventListener('done', e => {
+    try {
+      const data = JSON.parse(e.data || '{}');
+      if (data && data.vault) {
+        const v = data.vault;
+        const parts = [];
+        if (v.auto_accepted) parts.push(`${v.auto_accepted} auto-accepted`);
+        if (v.queued)        parts.push(`${v.queued} queued for review`);
+        if (parts.length)    showToast('Vault: ' + parts.join(', '));
+      }
+    } catch { /* ignore */ }
+    refreshReviewBadge();
+    searchComplete();
+  });
   eventSource.onerror = () => { if (isSearching) searchComplete(); };
 }
 
@@ -750,12 +1133,36 @@ function resultRowHtml(r) {
     ? `<button class="copy-btn" onclick="copyUrl(${JSON.stringify(r.site_url)})" title="Copy URL">&#x1f4cb;</button>`
     : '<span></span>';
 
-  return `<div class="result-row">
+  // Confidence pill — only meaningful when > 0
+  let confHtml = '';
+  if (typeof r.confidence === 'number' && r.confidence > 0) {
+    const cls = r.confidence >= 80 ? 'high' : r.confidence >= 50 ? 'med' : 'low';
+    confHtml = ` <span class="confidence-pill ${cls}" title="Verdict confidence">${r.confidence}%</span>`;
+  }
+
+  // Extracted-fields drawer (only on claimed with non-empty extracted)
+  let drawerHtml = '';
+  let hasExtracted = false;
+  if (r.extracted && Object.keys(r.extracted).length > 0) {
+    hasExtracted = true;
+    const dl = Object.entries(r.extracted).map(([k, v]) => {
+      const valStr = Array.isArray(v) ? v.join(', ') : v;
+      return `<dt>${escHtml(k)}</dt><dd>${escHtml(valStr)}</dd>`;
+    }).join('');
+    drawerHtml = `<dl class="extracted-panel">${dl}</dl>`;
+  }
+  const rowCls = hasExtracted ? 'result-row has-extracted' : 'result-row';
+  const onClick = hasExtracted
+    ? ` onclick="this.classList.toggle('expanded')"`
+    : '';
+
+  return `<div class="${rowCls}"${onClick}>
     <div class="result-site">${escHtml(r.site_name)}</div>
     <div class="result-url">${urlHtml}</div>
-    <span class="badge badge-${r.status}">${badgeLabel(r.status)}</span>
+    <span class="badge badge-${r.status}">${badgeLabel(r.status)}${confHtml}</span>
     <div class="result-time">${time}</div>
     ${copyHtml}
+    ${drawerHtml}
   </div>`;
 }
 
