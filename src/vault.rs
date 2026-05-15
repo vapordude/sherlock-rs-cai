@@ -1096,4 +1096,161 @@ mod tests {
         v.unlock("correct-passphrase").await.expect("unlock");
         assert!(!v.is_locked().await);
     }
+
+    /// End-to-end: open a vault → record a scan → simulate a hit with
+    /// extracted fields → propose-or-apply (with auto-accept on) → assert
+    /// the profile materialized + audit_log recorded the auto-accept.
+    #[tokio::test]
+    async fn auto_accept_flow_creates_profile_and_audits() {
+        use crate::result::ExtractedValue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+        record_scan_result(
+            &v,
+            &scan_id,
+            "alice",
+            "GitHub",
+            "https://github.com/alice",
+            "claimed",
+            95,
+            Some(150),
+            Some("abcdef"),
+        )
+        .await
+        .unwrap();
+
+        let mut extracted = std::collections::HashMap::new();
+        extracted.insert(
+            "avatar_url".to_string(),
+            ExtractedValue::One("https://cdn/alice.png".into()),
+        );
+        extracted.insert(
+            "display_name".to_string(),
+            ExtractedValue::One("Alice Example".into()),
+        );
+
+        let outcome = propose_or_apply(
+            &v,
+            &scan_id,
+            "alice",
+            "GitHub",
+            "https://github.com/alice",
+            &extracted,
+            95,
+            true, // auto_accept
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            ProposalOutcome::Applied { ref profile_id } => {
+                assert!(!profile_id.is_empty());
+            }
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        record_scan_finish(&v, &scan_id, 1).await.unwrap();
+
+        let profiles = list_profiles(&v).await.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0]["label"], "alice");
+        assert_eq!(profiles[0]["evidence_count"].as_i64().unwrap(), 2);
+
+        // Pending queue stays empty because auto-accept short-circuited.
+        let pending_n = count_pending(&v).await.unwrap();
+        assert_eq!(pending_n, 0);
+
+        // Audit log records the auto_accept.
+        let audit = list_audit(&v, 50).await.unwrap();
+        let has_auto = audit
+            .iter()
+            .any(|r| r["action"].as_str() == Some("auto_accept"));
+        assert!(has_auto, "expected an auto_accept audit row, got {audit:?}");
+    }
+
+    /// Same scenario but with auto_accept=false: the proposal must queue
+    /// for review, and explicit accept_pending must materialize the profile.
+    #[tokio::test]
+    async fn queue_then_accept_creates_profile() {
+        use crate::result::ExtractedValue;
+
+        let dir = tempfile::tempdir().unwrap();
+        let v = VaultState::new(dir.path());
+        v.init("test-pass-12345").await.unwrap();
+
+        let scan_id = record_scan_start(&v, r#"["bob"]"#.into(), 1).await.unwrap();
+        let mut extracted = std::collections::HashMap::new();
+        extracted.insert("bio".into(), ExtractedValue::One("hello".into()));
+
+        let outcome = propose_or_apply(
+            &v,
+            &scan_id,
+            "bob",
+            "GitHub",
+            "https://github.com/bob",
+            &extracted,
+            80,
+            false, // queue, don't auto-apply
+        )
+        .await
+        .unwrap();
+
+        let pending_id = match outcome {
+            ProposalOutcome::Queued { pending_id } => pending_id,
+            other => panic!("expected Queued, got {other:?}"),
+        };
+        assert_eq!(count_pending(&v).await.unwrap(), 1);
+        assert_eq!(list_profiles(&v).await.unwrap().len(), 0);
+
+        // Reject path: state flips, no profile created.
+        // (Re-create a second proposal for the accept path so this test
+        // also exercises rejection without interfering.)
+        let mut extracted2 = std::collections::HashMap::new();
+        extracted2.insert("bio".into(), ExtractedValue::One("world".into()));
+        let queued2 = propose_or_apply(
+            &v,
+            &scan_id,
+            "bob2",
+            "GitHub",
+            "https://github.com/bob2",
+            &extracted2,
+            80,
+            false,
+        )
+        .await
+        .unwrap();
+        let reject_id = match queued2 {
+            ProposalOutcome::Queued { pending_id } => pending_id,
+            other => panic!("expected Queued, got {other:?}"),
+        };
+        reject_pending(&v, reject_id, Some("nope".into()))
+            .await
+            .unwrap();
+
+        // Accept the first: profile materializes.
+        let profile_id = accept_pending(&v, pending_id, Some("looks good".into()))
+            .await
+            .unwrap();
+        assert!(!profile_id.is_empty());
+
+        let profiles = list_profiles(&v).await.unwrap();
+        assert_eq!(profiles.len(), 1);
+
+        // Pending queue is empty (one accepted, one rejected — neither
+        // remains in 'pending' state).
+        assert_eq!(count_pending(&v).await.unwrap(), 0);
+
+        // Audit log records both review_accept and review_reject.
+        let audit = list_audit(&v, 50).await.unwrap();
+        let actions: Vec<&str> = audit
+            .iter()
+            .filter_map(|r| r["action"].as_str())
+            .collect();
+        assert!(actions.contains(&"review_accept"));
+        assert!(actions.contains(&"review_reject"));
+    }
 }

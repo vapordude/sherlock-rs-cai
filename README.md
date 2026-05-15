@@ -52,6 +52,36 @@
 | 🔎 **Filter & sort** | Sort by name, status or response time — live text filter |
 | 📦 **Zero install** | Single self-contained 5 MB `.exe`, no dependencies required |
 | 🧩 **Modular Lists** | Drop JSON configs into `sites.d` to merge lists from Maigret, WhatsMyName, etc. |
+| 🎯 **Dual-pattern detection** | WhatsMyName-style `e_string` / `m_string` rules — both presence AND absence must agree, sharply cutting false positives |
+| 🧠 **Profile enrichment** | Per-site CSS-selector extractors pull avatar, bio, display name, location, follower count when available |
+| 🔐 **Encrypted vault** | Optional SQLCipher store accumulating profile evidence across scans. Argon2id-derived key, salt-on-disk-only, 30-min idle auto-lock |
+| 👤 **Human-in-the-loop** | Every cross-scan accumulation and cross-site correlation lands in a review queue. One-click "trust this batch" for high-confidence proposals when you want it |
+
+---
+
+## Vault — encrypted persistent store (optional)
+
+When the `vault` feature is enabled (default), Sherlock-RS can persist hits across scans into a SQLCipher-encrypted SQLite database at `~/.local/share/sherlock-rs/vault.db` (or platform equivalent).
+
+**First-run setup.** Click the "Set up vault" pill in the top-right of the UI, choose a passphrase, and click "Create vault". The passphrase derives the database encryption key via Argon2id; **the passphrase is never stored on disk**. Only a 16-byte salt is persisted alongside the database.
+
+> ⚠️ **Forgetting your passphrase means permanent data loss. There is no recovery.** If you don't need persistence, skip the dialog — search works fine without a vault.
+
+**Per-search opt-in.** In the search form, two toggles control vault behavior:
+- *Save to vault* — persist hits and extracted profile fields to the vault. Silently ignored when the vault is locked.
+- *Auto-accept* (enabled only when "Save to vault" is on) — apply high-confidence (≥80%) merge proposals immediately; lower-confidence ones still queue for review.
+
+**Review queue.** A purple "N pending" pill appears in the top-right whenever there are merges waiting for human judgement. Click it to accept/reject each proposal individually or accept all at once. Every action is recorded in the encrypted audit log.
+
+**Idle auto-lock.** The vault auto-locks after 30 minutes of inactivity. Re-enter your passphrase to unlock.
+
+**Build without the vault stack.** SQLCipher adds ~45–90s to a clean build. For CI environments or contributors not touching encryption:
+
+```bash
+cargo build --release --no-default-features
+```
+
+The resulting binary is functionally identical to today's Sherlock-RS — all vault routes are absent, no SQLCipher dependency is pulled in.
 
 ---
 
