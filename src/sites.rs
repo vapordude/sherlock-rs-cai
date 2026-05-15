@@ -73,6 +73,13 @@ pub struct SiteData {
     pub request_payload: Option<serde_json::Value>,
 }
 
+impl SiteData {
+    /// Substitutes the `{}` placeholder in `self.url` with the given username.
+    pub fn format_url(&self, username: &str) -> String {
+        self.url.replace("{}", username)
+    }
+}
+
 /// Determines the local application data directory to cache site lists.
 fn data_dir() -> PathBuf {
     dirs::data_dir()

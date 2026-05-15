@@ -129,7 +129,7 @@ pub async fn check_username(
                             username: username.to_string(),
                             site_name: name.clone(),
                             url_main: site.url_main.clone(),
-                            site_url: site.url.replace("{}", username),
+                            site_url: site.format_url(username),
                             status: QueryStatus::Illegal,
                             response_time_ms: None,
                             context: Some("Invalid username format for this site".into()),
@@ -205,7 +205,7 @@ async fn check_site_with_retry(
         username: username.to_string(),
         site_name: name.to_string(),
         url_main: site.url_main.clone(),
-        site_url: site.url.replace("{}", username),
+        site_url: site.format_url(username),
         status: QueryStatus::Unknown,
         response_time_ms: None,
         context: Some("All retries exhausted with no result".into()),
@@ -229,7 +229,7 @@ async fn check_site(
     client: &reqwest::Client,
     client_no_redir: &reqwest::Client,
 ) -> QueryResult {
-    let url = site.url.replace("{}", username);
+    let url = site.format_url(username);
     let probe_url = site
         .url_probe
         .as_ref()
