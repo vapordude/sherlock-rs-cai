@@ -6,6 +6,14 @@ authors = ["Olivier Hoarau <tarraw974@gmail.com>"]
 description = "Hunt down social media accounts by username — Rust rewrite with modern UI"
 license = "MIT"
 
+[features]
+# vault: enables the encrypted SQLCipher store, Argon2id KDF, key zeroization.
+# Default-on so the standard binary has full functionality; --no-default-features
+# skips the SQLCipher compile (saves ~45-90s on a clean build) for contributors
+# not touching encryption.
+default = ["vault"]
+vault = ["dep:rusqlite", "dep:tokio-rusqlite", "dep:argon2", "dep:zeroize", "dep:secrecy"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
@@ -19,6 +27,25 @@ csv = "1"
 tokio-stream = "0.1"
 anyhow = "1"
 rand = "0.8"
+
+# Detection + enrichment + supporting utilities (always-on).
+scraper = "0.20"
+sha2 = "0.10"
+base64 = "0.22"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+uuid = { version = "1.10", features = ["v4", "serde"] }
+tower-http = { version = "0.6", features = ["limit"] }
+serde_with = "3"
+
+# Vault stack (gated by `vault` feature).
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"], optional = true }
+tokio-rusqlite = { version = "0.6", optional = true }
+argon2 = { version = "0.5", features = ["std", "password-hash"], optional = true }
+zeroize = { version = "1.8", features = ["zeroize_derive"], optional = true }
+secrecy = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

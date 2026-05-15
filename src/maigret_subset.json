@@ -1,0 +1,42 @@
+{
+  "_meta": {
+    "description": "Curated profile-extraction rules in a Maigret-inspired shape. Hand-vendored — full upstream Maigret data uses template indirections we don't resolve. Add entries here over time.",
+    "schema": {
+      "<site_name>": {
+        "url": "URL with {} placeholder for the username",
+        "url_main": "Bare host URL",
+        "categories": ["optional", "tags"],
+        "detection": {
+          "e_code": "optional HTTP status asserting profile exists",
+          "e_string": "optional substring asserting profile exists",
+          "m_code": "optional HTTP status asserting profile is missing",
+          "m_string": "optional substring asserting profile is missing"
+        },
+        "extractors": [
+          {
+            "field": "one of the canonical vocab",
+            "selector": "CSS selector",
+            "attribute": "optional attribute name",
+            "regex": "optional capture-group-1 regex",
+            "multi": false
+          }
+        ]
+      }
+    }
+  },
+  "GitHub": {
+    "url": "https://github.com/{}",
+    "url_main": "https://github.com",
+    "categories": ["dev", "social"],
+    "detection": {
+      "e_code": 200,
+      "m_code": 404
+    },
+    "extractors": [
+      { "field": "avatar_url",   "selector": "img.avatar-user", "attribute": "src" },
+      { "field": "display_name", "selector": "span.vcard-fullname" },
+      { "field": "bio",          "selector": "div.user-profile-bio" },
+      { "field": "location",     "selector": "li[itemprop=\"homeLocation\"] span" }
+    ]
+  }
+}
