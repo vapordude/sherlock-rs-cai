@@ -29,6 +29,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use rand::RngCore;
+use rusqlite::OptionalExtension;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -245,6 +246,639 @@ impl VaultState {
         }
         should_lock
     }
+
+    /// Run a callback against the underlying `tokio_rusqlite::Connection`
+    /// only if the vault is unlocked. The callback is the standard
+    /// `tokio_rusqlite` closure signature.
+    pub async fn with_conn<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> tokio_rusqlite::Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let g = self.inner.read().await;
+        let conn = match &g.handle {
+            Some(h) => h.conn.clone(),
+            None => anyhow::bail!("vault locked"),
+        };
+        drop(g);
+        Ok(conn.call(f).await?)
+    }
+}
+
+/// Record the start of a scan and return its `scan_id`. Stored unencrypted-
+/// at-row-level but DB-encrypted at rest by SQLCipher. Caller emits
+/// `record_scan_finish` once all per-site results have streamed back.
+pub async fn record_scan_start(
+    vault: &VaultState,
+    usernames_json: String,
+    site_count: usize,
+) -> Result<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = time::OffsetDateTime::now_utc().to_string();
+    let id_clone = id.clone();
+    vault
+        .with_conn(move |c| {
+            c.execute(
+                "INSERT INTO scans (id, started_at, usernames, site_count, hits) VALUES (?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![id_clone, now, usernames_json, site_count as i64],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(id)
+}
+
+pub async fn record_scan_finish(vault: &VaultState, scan_id: &str, hits: usize) -> Result<()> {
+    let scan_id = scan_id.to_string();
+    let now = time::OffsetDateTime::now_utc().to_string();
+    vault
+        .with_conn(move |c| {
+            c.execute(
+                "UPDATE scans SET finished_at = ?1, hits = ?2 WHERE id = ?3",
+                rusqlite::params![now, hits as i64, scan_id],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+/// Write a single `scan_results` row for any verdict — claimed, available,
+/// unknown, tentative, illegal, waf — so the scan's full trace stays
+/// recoverable later.
+#[allow(clippy::too_many_arguments)]
+pub async fn record_scan_result(
+    vault: &VaultState,
+    scan_id: &str,
+    username: &str,
+    site_name: &str,
+    site_url: &str,
+    status: &str,
+    confidence: u8,
+    response_time_ms: Option<u64>,
+    body_sha256: Option<&str>,
+) -> Result<()> {
+    let scan_id = scan_id.to_string();
+    let username = username.to_string();
+    let site_name = site_name.to_string();
+    let site_url = site_url.to_string();
+    let status = status.to_string();
+    let body_sha256 = body_sha256.map(str::to_string);
+    let seen_at = time::OffsetDateTime::now_utc().to_string();
+    vault
+        .with_conn(move |c| {
+            c.execute(
+                "INSERT INTO scan_results
+                    (scan_id, username, site_name, site_url, status, confidence,
+                     response_time_ms, body_sha256, seen_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                rusqlite::params![
+                    scan_id,
+                    username,
+                    site_name,
+                    site_url,
+                    status,
+                    confidence as i64,
+                    response_time_ms.map(|v| v as i64),
+                    body_sha256,
+                    seen_at,
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+/// A correlation proposal — what we'd accumulate, who'd be linked to what.
+/// Either applied immediately (when `auto_accept && score >= threshold`) or
+/// queued as a `pending_merges` row for human review.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct Proposal {
+    /// `new_profile` | `accumulate` | `cross_site_correlation`
+    pub kind: String,
+    pub scan_id: String,
+    pub username: String,
+    pub site_name: String,
+    pub site_url: String,
+    /// `Some` for accumulate/cross-site; `None` for new_profile (a fresh
+    /// profile will be created on accept).
+    pub target_profile_id: Option<String>,
+    /// Suggested label when creating a new profile.
+    pub new_label: Option<String>,
+    /// `(field, value, confidence)` rows to insert against the target profile.
+    pub evidence: Vec<EvidenceRow>,
+    /// Human-readable explanation for the review UI.
+    pub rationale: String,
+    /// 0..1 — drives the auto-accept threshold gate.
+    pub score: f64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct EvidenceRow {
+    pub field: String,
+    pub value: String,
+    pub confidence: u8,
+}
+
+/// Auto-accept threshold. Proposals at or above this score skip the
+/// pending-review queue when the user has enabled `auto_accept` for the
+/// current scan. Tuned conservatively — false positives at this level
+/// would erode the user's trust in the system.
+pub const AUTO_ACCEPT_THRESHOLD: f64 = 0.80;
+
+/// Examine extracted evidence from a claimed hit, decide one of:
+///   * **NewProfile** — no profile matches; suggest creating one (score 1.0
+///     because there's no ambiguity to resolve).
+///   * **Accumulate** — username already attached to an existing profile;
+///     append evidence there (score 0.9).
+///   * **CrossSiteCorrelation** — high-signal field (`avatar_url`,
+///     `display_name`, or `full_name`) shares its value with another
+///     profile's existing evidence; suggest linking (score = fraction of
+///     high-signal fields matched).
+///
+/// `auto_accept=true` AND `score >= AUTO_ACCEPT_THRESHOLD` ⇒ apply now and
+/// write an `auto_accept` audit-log row. Otherwise queue in
+/// `pending_merges` for human review.
+#[allow(clippy::too_many_arguments)]
+pub async fn propose_or_apply(
+    vault: &VaultState,
+    scan_id: &str,
+    username: &str,
+    site_name: &str,
+    site_url: &str,
+    extracted: &std::collections::HashMap<String, crate::result::ExtractedValue>,
+    confidence: u8,
+    auto_accept: bool,
+) -> Result<ProposalOutcome> {
+    let evidence_rows = evidence_rows_from_extracted(extracted, confidence);
+    if evidence_rows.is_empty() {
+        return Ok(ProposalOutcome::NoEvidence);
+    }
+    let proposal =
+        decide_proposal(vault, scan_id, username, site_name, site_url, &evidence_rows).await?;
+
+    if auto_accept && proposal.score >= AUTO_ACCEPT_THRESHOLD {
+        let profile_id = apply_proposal(vault, &proposal).await?;
+        let detail = format!(
+            "auto_accept score={:.2} kind={} site={}",
+            proposal.score, proposal.kind, site_name
+        );
+        let _ = audit_with_vault(vault, "auto_accept", Some(&detail)).await;
+        Ok(ProposalOutcome::Applied { profile_id })
+    } else {
+        let pending_id = queue_pending(vault, &proposal).await?;
+        Ok(ProposalOutcome::Queued { pending_id })
+    }
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProposalOutcome {
+    NoEvidence,
+    Queued { pending_id: i64 },
+    Applied { profile_id: String },
+}
+
+fn evidence_rows_from_extracted(
+    extracted: &std::collections::HashMap<String, crate::result::ExtractedValue>,
+    confidence: u8,
+) -> Vec<EvidenceRow> {
+    use crate::result::ExtractedValue;
+    let mut out = Vec::new();
+    for (field, val) in extracted {
+        match val {
+            ExtractedValue::One(s) if !s.is_empty() => out.push(EvidenceRow {
+                field: field.clone(),
+                value: s.clone(),
+                confidence,
+            }),
+            ExtractedValue::Many(vs) => {
+                for v in vs {
+                    if !v.is_empty() {
+                        out.push(EvidenceRow {
+                            field: field.clone(),
+                            value: v.clone(),
+                            confidence,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+async fn decide_proposal(
+    vault: &VaultState,
+    scan_id: &str,
+    username: &str,
+    site_name: &str,
+    site_url: &str,
+    evidence: &[EvidenceRow],
+) -> Result<Proposal> {
+    // 1. Look for an existing profile that already has this username in its
+    //    evidence — straightforward accumulation.
+    let username_match = find_profile_by_username(vault, username).await?;
+
+    // 2. High-signal field correlation: collect distinct profile IDs whose
+    //    evidence contains any (avatar_url|full_name|display_name) =
+    //    incoming value. A match is high-confidence because these fields are
+    //    rarely duplicated across unrelated people.
+    let high_signal_fields = ["avatar_url", "full_name", "display_name"];
+    let mut matched_profiles: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut high_signal_total = 0;
+    let mut high_signal_matched = 0;
+    for ev in evidence {
+        if high_signal_fields.contains(&ev.field.as_str()) {
+            high_signal_total += 1;
+            let pids = find_profiles_by_field_value(vault, &ev.field, &ev.value).await?;
+            if !pids.is_empty() {
+                high_signal_matched += 1;
+                matched_profiles.extend(pids);
+            }
+        }
+    }
+
+    // Decide. Prefer username-based accumulation when the username matches
+    // an existing profile AND no cross-site correlation contradicts it.
+    if let Some(profile_id) = username_match {
+        return Ok(Proposal {
+            kind: "accumulate".into(),
+            scan_id: scan_id.into(),
+            username: username.into(),
+            site_name: site_name.into(),
+            site_url: site_url.into(),
+            target_profile_id: Some(profile_id),
+            new_label: None,
+            evidence: evidence.to_vec(),
+            rationale: format!(
+                "Username '{username}' already attached to this profile; appending evidence from {site_name}."
+            ),
+            score: 0.90,
+        });
+    }
+    // Cross-site correlation — high-signal fields match an existing profile.
+    if let Some(profile_id) = matched_profiles.iter().next().cloned() {
+        let score = if high_signal_total == 0 {
+            0.0
+        } else {
+            high_signal_matched as f64 / high_signal_total as f64
+        };
+        return Ok(Proposal {
+            kind: "cross_site_correlation".into(),
+            scan_id: scan_id.into(),
+            username: username.into(),
+            site_name: site_name.into(),
+            site_url: site_url.into(),
+            target_profile_id: Some(profile_id),
+            new_label: None,
+            evidence: evidence.to_vec(),
+            rationale: format!(
+                "{high_signal_matched}/{high_signal_total} high-signal fields (avatar_url / full_name / display_name) match an existing profile."
+            ),
+            score,
+        });
+    }
+    // Brand-new profile.
+    Ok(Proposal {
+        kind: "new_profile".into(),
+        scan_id: scan_id.into(),
+        username: username.into(),
+        site_name: site_name.into(),
+        site_url: site_url.into(),
+        target_profile_id: None,
+        new_label: Some(username.into()),
+        evidence: evidence.to_vec(),
+        rationale: format!("No prior profile for '{username}'; suggesting a new profile."),
+        score: 1.0,
+    })
+}
+
+async fn find_profile_by_username(vault: &VaultState, username: &str) -> Result<Option<String>> {
+    let username = username.to_string();
+    vault
+        .with_conn(move |c| {
+            let row: Option<String> = c
+                .prepare("SELECT profile_id FROM evidence WHERE username = ?1 AND profile_id IS NOT NULL LIMIT 1")?
+                .query_row(rusqlite::params![username], |r| r.get(0))
+                .optional()?;
+            Ok(row)
+        })
+        .await
+}
+
+async fn find_profiles_by_field_value(
+    vault: &VaultState,
+    field: &str,
+    value: &str,
+) -> Result<Vec<String>> {
+    let field = field.to_string();
+    let value = value.to_string();
+    vault
+        .with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT DISTINCT profile_id FROM evidence
+                 WHERE field = ?1 AND value = ?2 AND profile_id IS NOT NULL",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![field, value], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect::<Vec<_>>();
+            Ok(rows)
+        })
+        .await
+}
+
+/// Apply a proposal — creating the profile if needed and inserting one
+/// row per `EvidenceRow`. Returns the resulting `profile_id`. Used both on
+/// auto-accept and on explicit `POST /api/review/:id/accept`.
+async fn apply_proposal(vault: &VaultState, p: &Proposal) -> Result<String> {
+    let proposal = p.clone();
+    vault
+        .with_conn(move |c| {
+            let tx = c.transaction()?;
+            let profile_id = match &proposal.target_profile_id {
+                Some(id) => id.clone(),
+                None => {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    let now = time::OffsetDateTime::now_utc().to_string();
+                    tx.execute(
+                        "INSERT INTO profiles (id, label, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?3)",
+                        rusqlite::params![id, proposal.new_label.clone().unwrap_or_default(), now],
+                    )?;
+                    id
+                }
+            };
+            let now = time::OffsetDateTime::now_utc().to_string();
+            for ev in &proposal.evidence {
+                tx.execute(
+                    "INSERT OR IGNORE INTO evidence
+                        (profile_id, scan_id, username, site_name, site_url,
+                         field, value, confidence, seen_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    rusqlite::params![
+                        profile_id,
+                        proposal.scan_id,
+                        proposal.username,
+                        proposal.site_name,
+                        proposal.site_url,
+                        ev.field,
+                        ev.value,
+                        ev.confidence as i64,
+                        now
+                    ],
+                )?;
+            }
+            tx.execute(
+                "UPDATE profiles SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, profile_id],
+            )?;
+            tx.commit()?;
+            Ok(profile_id)
+        })
+        .await
+}
+
+async fn queue_pending(vault: &VaultState, p: &Proposal) -> Result<i64> {
+    let proposal = p.clone();
+    vault
+        .with_conn(move |c| {
+            let candidate_json = serde_json::to_string(&proposal).unwrap_or_default();
+            let now = time::OffsetDateTime::now_utc().to_string();
+            c.execute(
+                "INSERT INTO pending_merges
+                    (kind, proposed_at, profile_id, candidate, rationale, score)
+                 VALUES (?1,?2,?3,?4,?5,?6)",
+                rusqlite::params![
+                    proposal.kind,
+                    now,
+                    proposal.target_profile_id,
+                    candidate_json,
+                    proposal.rationale,
+                    proposal.score
+                ],
+            )?;
+            Ok(c.last_insert_rowid())
+        })
+        .await
+}
+
+pub async fn list_profiles(vault: &VaultState) -> Result<Vec<serde_json::Value>> {
+    vault
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT p.id, p.label, p.created_at, p.updated_at,
+                        (SELECT COUNT(*) FROM evidence e WHERE e.profile_id = p.id) as evidence_count
+                 FROM profiles p ORDER BY p.updated_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok(serde_json::json!({
+                        "id":             r.get::<_, String>(0)?,
+                        "label":          r.get::<_, String>(1)?,
+                        "created_at":     r.get::<_, String>(2)?,
+                        "updated_at":     r.get::<_, String>(3)?,
+                        "evidence_count": r.get::<_, i64>(4)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+}
+
+pub async fn get_profile(vault: &VaultState, id: &str) -> Result<serde_json::Value> {
+    let id = id.to_string();
+    vault
+        .with_conn(move |c| {
+            let id_clone = id.clone();
+            let profile: Option<serde_json::Value> = c
+                .prepare("SELECT id, label, created_at, updated_at, note FROM profiles WHERE id = ?1")?
+                .query_row(rusqlite::params![id_clone], |r| {
+                    Ok(serde_json::json!({
+                        "id":         r.get::<_, String>(0)?,
+                        "label":      r.get::<_, String>(1)?,
+                        "created_at": r.get::<_, String>(2)?,
+                        "updated_at": r.get::<_, String>(3)?,
+                        "note":       r.get::<_, Option<String>>(4)?,
+                    }))
+                })
+                .optional()?;
+            let Some(mut profile) = profile else {
+                return Ok(serde_json::Value::Null);
+            };
+            let mut stmt = c.prepare(
+                "SELECT site_name, site_url, username, field, value, confidence, seen_at
+                 FROM evidence WHERE profile_id = ?1 ORDER BY seen_at DESC",
+            )?;
+            let evidence: Vec<serde_json::Value> = stmt
+                .query_map(rusqlite::params![id], |r| {
+                    Ok(serde_json::json!({
+                        "site_name":  r.get::<_, String>(0)?,
+                        "site_url":   r.get::<_, String>(1)?,
+                        "username":   r.get::<_, String>(2)?,
+                        "field":      r.get::<_, String>(3)?,
+                        "value":      r.get::<_, String>(4)?,
+                        "confidence": r.get::<_, i64>(5)?,
+                        "seen_at":    r.get::<_, String>(6)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            if let Some(map) = profile.as_object_mut() {
+                map.insert("evidence".into(), serde_json::Value::Array(evidence));
+            }
+            Ok(profile)
+        })
+        .await
+}
+
+pub async fn list_pending(vault: &VaultState) -> Result<Vec<serde_json::Value>> {
+    vault
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT id, kind, proposed_at, profile_id, candidate, rationale, score
+                 FROM pending_merges WHERE state = 'pending'
+                 ORDER BY proposed_at DESC",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    let candidate_str: String = r.get(4)?;
+                    let candidate: serde_json::Value =
+                        serde_json::from_str(&candidate_str).unwrap_or(serde_json::Value::Null);
+                    Ok(serde_json::json!({
+                        "id":          r.get::<_, i64>(0)?,
+                        "kind":        r.get::<_, String>(1)?,
+                        "proposed_at": r.get::<_, String>(2)?,
+                        "profile_id":  r.get::<_, Option<String>>(3)?,
+                        "candidate":   candidate,
+                        "rationale":   r.get::<_, String>(5)?,
+                        "score":       r.get::<_, f64>(6)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+}
+
+pub async fn count_pending(vault: &VaultState) -> Result<i64> {
+    vault
+        .with_conn(|c| {
+            let n: i64 = c.query_row(
+                "SELECT COUNT(*) FROM pending_merges WHERE state = 'pending'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        })
+        .await
+}
+
+pub async fn accept_pending(vault: &VaultState, id: i64, note: Option<String>) -> Result<String> {
+    let candidate_json: String = vault
+        .with_conn(move |c| {
+            let row: Option<(String, String)> = c
+                .prepare("SELECT candidate, state FROM pending_merges WHERE id = ?1")?
+                .query_row(rusqlite::params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?;
+            match row {
+                Some((c_str, s)) if s == "pending" => Ok(c_str),
+                Some(_) => Err(tokio_rusqlite::Error::Other(
+                    "already resolved".to_string().into(),
+                )),
+                None => Err(tokio_rusqlite::Error::Other(
+                    "not found".to_string().into(),
+                )),
+            }
+        })
+        .await?;
+    let proposal: Proposal = serde_json::from_str(&candidate_json)?;
+    let profile_id = apply_proposal(vault, &proposal).await?;
+    let note_clone = note.clone();
+    vault
+        .with_conn(move |c| {
+            let now = time::OffsetDateTime::now_utc().to_string();
+            c.execute(
+                "UPDATE pending_merges
+                   SET state = 'accepted', resolved_at = ?1, resolved_note = ?2
+                 WHERE id = ?3",
+                rusqlite::params![now, note_clone, id],
+            )?;
+            Ok(())
+        })
+        .await?;
+    let detail = format!("accepted pending#{id} note={:?}", note);
+    let _ = audit_with_vault(vault, "review_accept", Some(&detail)).await;
+    Ok(profile_id)
+}
+
+pub async fn reject_pending(vault: &VaultState, id: i64, note: Option<String>) -> Result<()> {
+    let note_clone = note.clone();
+    vault
+        .with_conn(move |c| {
+            let now = time::OffsetDateTime::now_utc().to_string();
+            let updated = c.execute(
+                "UPDATE pending_merges
+                   SET state = 'rejected', resolved_at = ?1, resolved_note = ?2
+                 WHERE id = ?3 AND state = 'pending'",
+                rusqlite::params![now, note_clone, id],
+            )?;
+            if updated == 0 {
+                return Err(tokio_rusqlite::Error::Other(
+                    "not pending or not found".to_string().into(),
+                ));
+            }
+            Ok(())
+        })
+        .await?;
+    let detail = format!("rejected pending#{id} note={:?}", note);
+    let _ = audit_with_vault(vault, "review_reject", Some(&detail)).await;
+    Ok(())
+}
+
+pub async fn list_audit(vault: &VaultState, limit: i64) -> Result<Vec<serde_json::Value>> {
+    vault
+        .with_conn(move |c| {
+            let mut stmt =
+                c.prepare("SELECT id, at, action, detail FROM audit_log ORDER BY id DESC LIMIT ?1")?;
+            let rows = stmt
+                .query_map(rusqlite::params![limit], |r| {
+                    Ok(serde_json::json!({
+                        "id":     r.get::<_, i64>(0)?,
+                        "at":     r.get::<_, String>(1)?,
+                        "action": r.get::<_, String>(2)?,
+                        "detail": r.get::<_, Option<String>>(3)?,
+                    }))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+}
+
+async fn audit_with_vault(vault: &VaultState, action: &str, detail: Option<&str>) -> Result<()> {
+    let action = action.to_string();
+    let detail = detail.map(str::to_string);
+    vault
+        .with_conn(move |c| {
+            c.execute(
+                "INSERT INTO audit_log (at, action, detail) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    time::OffsetDateTime::now_utc().to_string(),
+                    action,
+                    detail
+                ],
+            )?;
+            Ok(())
+        })
+        .await
 }
 
 /// Argon2id KDF — `(passphrase, salt) -> 32-byte key`. Key bytes are
