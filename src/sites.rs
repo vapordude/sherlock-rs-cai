@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 const DATA_URL: &str = "https://raw.githubusercontent.com/sherlock-project/sherlock/master/sherlock_project/resources/data.json";
+const WMN_DATA_URL: &str =
+    "https://raw.githubusercontent.com/WebBreacher/WhatsMyName/main/wmn-data.json";
 
 /// Represents the error message(s) expected from a site when a username is not found.
 ///
@@ -47,6 +49,23 @@ impl ErrorCode {
 
 /// The definition of a specific social media site's detection logic, structure,
 /// and metadata matching the standard Sherlock database format.
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct WmnData {
+    pub sites: Vec<WmnSite>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug)]
+pub struct WmnSite {
+    pub name: String,
+    pub uri_check: String,
+    pub e_code: u16,
+    pub e_string: String,
+    pub m_string: String,
+    pub m_code: u16,
+    pub cat: String,
+    pub known: Vec<String>,
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct SiteData {
     #[serde(rename = "errorMsg")]
@@ -105,6 +124,69 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
 
     let json = client.get(DATA_URL).send().await?.text().await?;
     let mut sites = parse_sites(&json)?;
+
+    // Add WhatsMyName data
+    if let Ok(wmn_res) = client.get(WMN_DATA_URL).send().await {
+        if let Ok(wmn_json) = wmn_res.text().await {
+            if let Ok(wmn_data) = serde_json::from_str::<WmnData>(&wmn_json) {
+                for site in wmn_data.sites {
+                    let mut is_valid = true;
+                    let error_type = if site.e_code == 200 && !site.e_string.is_empty() {
+                        "message".to_string()
+                    } else if site.e_code != 200 {
+                        "status_code".to_string()
+                    } else {
+                        is_valid = false;
+                        "".to_string()
+                    };
+
+                    if is_valid {
+                        let url = site.uri_check.replace("{account}", "{}");
+                        // extract url_main (e.g. from https://example.com/u/{} to https://example.com/)
+                        let url_main = url.split('/').take(3).collect::<Vec<_>>().join("/") + "/";
+
+                        let error_msg = if error_type == "message" {
+                            if !site.m_string.is_empty() {
+                                Some(ErrorMsg::Single(site.m_string))
+                            } else {
+                                Some(ErrorMsg::Single(site.e_string)) // Fallback if m_string is empty
+                            }
+                        } else {
+                            None
+                        };
+
+                        let error_code = if error_type == "status_code" {
+                            Some(ErrorCode::Single(site.e_code))
+                        } else {
+                            None
+                        };
+
+                        let site_data = SiteData {
+                            error_msg,
+                            error_type,
+                            error_code,
+                            error_url: None,
+                            url: url.clone(),
+                            url_main,
+                            url_probe: None,
+                            username_claimed: site.known.first().cloned(),
+                            username_unclaimed: Some(
+                                "invalid_unclaimed_test_123456789".to_string(),
+                            ),
+                            regex_check: None,
+                            is_nsfw: if site.cat == "porn" { Some(true) } else { None },
+                            headers: None,
+                            request_method: None,
+                            request_payload: None,
+                        };
+
+                        let key = format!("[WMN] {}", site.name);
+                        sites.insert(key, site_data);
+                    }
+                }
+            }
+        }
+    }
 
     // Add built-in custom sites
     let custom_json = include_str!("custom_sites.json");

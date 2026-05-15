@@ -311,9 +311,7 @@ async fn check_site(
 
 fn detect_waf(body: &str) -> bool {
     let lower = body.to_lowercase();
-    WAF_SIGNATURES
-        .iter()
-        .any(|&sig| lower.contains(sig))
+    WAF_SIGNATURES.iter().any(|&sig| lower.contains(sig))
 }
 
 fn determine_status(site: &SiteData, status_code: u16, body: &str) -> QueryStatus {
