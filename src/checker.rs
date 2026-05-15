@@ -283,6 +283,22 @@ async fn check_site(
             let (status, confidence) = determine_status_v2(site, status_code, &body);
             let body_sha256 = Some(body_excerpt_sha256(&body));
 
+            // Run profile extractors only on positively-claimed profiles.
+            // Tentative is deliberately excluded — a contradictory rule
+            // would yield unreliable extraction.
+            let extracted = if matches!(status, QueryStatus::Claimed)
+                && !site.compiled_extractors.is_empty()
+            {
+                let map = crate::extract::run_extractors(&body, &site.compiled_extractors);
+                if map.is_empty() {
+                    None
+                } else {
+                    Some(map)
+                }
+            } else {
+                None
+            };
+
             QueryResult {
                 username: username.to_string(),
                 site_name: name.to_string(),
@@ -292,7 +308,7 @@ async fn check_site(
                 response_time_ms: Some(elapsed),
                 context: None,
                 confidence,
-                extracted: None,
+                extracted,
                 body_sha256,
             }
         }

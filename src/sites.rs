@@ -349,6 +349,17 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
         );
     }
 
+    // Final pass: `merge_site` resets the compiled-regex and
+    // compiled-extractors caches because it can't easily decide which side's
+    // pre-compiled artefacts to keep. Rebuild them all here so callers see
+    // ready-to-use sites.
+    for site in sites.values_mut() {
+        if let Some(pattern) = &site.regex_check {
+            site.compiled_regex = Regex::new(pattern).ok();
+        }
+        compile_site_extractors(site);
+    }
+
     if let Ok(merged_json) = serde_json::to_string(&sites) {
         let _ = tokio::fs::write(dir.join("data.merged.json"), &merged_json).await;
     }
@@ -514,7 +525,7 @@ fn merge_site(a: SiteData, b: SiteData) -> SiteData {
 
 /// Parse the upstream Sherlock `data.json` (top-level `{ site_name: { ... } }`
 /// shape). Strips the `$schema` key, drops entries that fail to deserialize.
-/// Compiles each `regex_check` once.
+/// Compiles each `regex_check` and any extractors once.
 fn parse_sherlock(json: &str) -> Result<HashMap<String, SiteData>> {
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(json)?;
     let mut sites: HashMap<String, SiteData> = raw
@@ -530,9 +541,23 @@ fn parse_sherlock(json: &str) -> Result<HashMap<String, SiteData>> {
         if let Some(pattern) = &site.regex_check {
             site.compiled_regex = Regex::new(pattern).ok();
         }
+        compile_site_extractors(site);
     }
 
     Ok(sites)
+}
+
+/// Compile each `Extractor` on a single site, dropping any whose CSS
+/// selector fails to parse. Idempotent — call once after deserialization.
+fn compile_site_extractors(site: &mut SiteData) {
+    if site.extractors.is_empty() {
+        return;
+    }
+    site.compiled_extractors = site
+        .extractors
+        .iter()
+        .filter_map(crate::extract::compile_extractor)
+        .collect();
 }
 
 #[derive(Deserialize)]
@@ -605,6 +630,11 @@ fn parse_wmn(json: &str) -> Result<HashMap<String, SiteData>> {
         };
         out.insert(w.name, site);
     }
+    // WMN currently carries no extractors, but compile pass is cheap and
+    // future-proofs additions.
+    for site in out.values_mut() {
+        compile_site_extractors(site);
+    }
     Ok(out)
 }
 
@@ -669,6 +699,9 @@ fn parse_maigret(json: &str) -> Result<HashMap<String, SiteData>> {
             compiled_extractors: Vec::new(),
         };
         out.insert(name, site);
+    }
+    for site in out.values_mut() {
+        compile_site_extractors(site);
     }
     Ok(out)
 }
