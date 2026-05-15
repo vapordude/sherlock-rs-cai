@@ -90,6 +90,11 @@ struct SseResultData {
     response_time_ms: Option<u64>,
     checked: usize,
     total: usize,
+    /// Verdict confidence 0..=100 (see `checker::determine_status_v2`).
+    confidence: u8,
+    /// Extracted profile fields when present (only on `Claimed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extracted: Option<std::collections::HashMap<String, crate::result::ExtractedValue>>,
 }
 
 /// Parses a comma/newline/semicolon-separated list of usernames into a
@@ -175,6 +180,8 @@ fn spawn_search_task(args: SearchTaskArgs) {
                     response_time_ms: result.response_time_ms,
                     checked,
                     total,
+                    confidence: result.confidence,
+                    extracted: result.extracted,
                 };
 
                 let json = serde_json::to_string(&event_data).unwrap_or_default();
