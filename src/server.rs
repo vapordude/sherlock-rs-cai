@@ -96,7 +96,7 @@ struct SseResultData {
 /// deduplicated, trimmed, length-capped vector. Order is preserved.
 fn parse_usernames(raw: &str) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    raw.split(|c: char| c == ',' || c == '\n' || c == ';')
+    raw.split([',', '\n', ';'])
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && seen.insert(s.clone()))
         .take(10)
@@ -143,8 +143,7 @@ fn spawn_search_task(args: SearchTaskArgs) {
             }
 
             // ── Run checker ───────────────────────────────────────────────────
-            let (checker_tx, mut checker_rx) =
-                tokio::sync::mpsc::channel::<QueryResult>(300);
+            let (checker_tx, mut checker_rx) = tokio::sync::mpsc::channel::<QueryResult>(300);
 
             let sites_clone = sites.clone();
             let uname = username.clone();
@@ -197,9 +196,7 @@ fn spawn_search_task(args: SearchTaskArgs) {
             .unwrap_or_default();
 
             if sse_tx
-                .send(Ok(Event::default()
-                    .event("username_done")
-                    .data(done_json)))
+                .send(Ok(Event::default().event("username_done").data(done_json)))
                 .await
                 .is_err()
             {
