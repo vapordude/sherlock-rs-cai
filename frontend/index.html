@@ -431,13 +431,66 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 .extracted-panel {
   grid-column: 1 / -1;
   background: rgba(0,0,0,.2); border-radius: 6px;
-  padding: 8px 12px; margin-top: 6px;
+  padding: 10px 14px; margin-top: 6px;
   font-size: .78rem; color: var(--text-muted);
   display: none;
 }
-.result-row.expanded .extracted-panel { display: block; }
-.extracted-panel dt { color: var(--accent-dim); display: inline; font-weight: 600; margin-right: 4px; }
-.extracted-panel dd { display: inline; margin: 0 12px 0 0; color: var(--text-dim); }
+.result-row.expanded .extracted-panel { display: flex; gap: 14px; align-items: flex-start; }
+.extracted-thumb {
+  width: 56px; height: 56px; border-radius: 6px;
+  object-fit: cover; border: 1px solid var(--bg-card); flex-shrink: 0;
+}
+.extracted-fields { flex: 1; min-width: 0; }
+.extracted-fields dt { color: var(--accent-dim); display: inline; font-weight: 600; margin-right: 4px; }
+.extracted-fields dd { display: inline; margin: 0 12px 0 0; color: var(--text-dim); }
+.extracted-fields dd a { color: var(--accent); text-decoration: none; }
+.extracted-fields dd a:hover { text-decoration: underline; }
+.ytdlp-btn {
+  background: rgba(124,58,237,.15); border: 1px solid rgba(124,58,237,.4);
+  color: #a78bfa; border-radius: 4px; padding: 1px 6px;
+  font-size: .65rem; cursor: pointer; margin-left: 4px;
+}
+.ytdlp-btn:hover { background: rgba(124,58,237,.25); }
+
+/* Profile detail panel inside the profilesDialog */
+.profile-detail-wrap { display: grid; grid-template-columns: 220px 1fr; gap: 14px; }
+.profile-list-pane   { border-right: 1px solid var(--bg-card); padding-right: 10px; max-height:60vh; overflow:auto; }
+.profile-list-item   {
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 4px;
+}
+.profile-list-item:hover    { background: var(--bg-card); }
+.profile-list-item.selected { background: var(--bg-card); border-color: var(--accent); }
+.profile-detail-pane { max-height:60vh; overflow:auto; padding-right: 4px; }
+.profile-detail-pane h3 { margin: 0 0 6px; color: var(--text); font-size: 1rem; }
+.profile-meta { color: var(--text-muted); font-size: .75rem; margin-bottom: 10px; }
+.profile-note-area {
+  width: 100%; min-height: 60px; padding: 8px;
+  background: var(--bg-deep); border: 1px solid var(--bg-card);
+  border-radius: 6px; color: var(--text); font-size: .8rem;
+  box-sizing: border-box; font-family: inherit; resize: vertical;
+}
+.profile-section { margin-top: 12px; }
+.profile-section-title { color: var(--accent-dim); font-size: .75rem;
+  text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
+.profile-media-grid { display: flex; gap: 6px; flex-wrap: wrap; }
+.profile-media-grid img {
+  width: 72px; height: 72px; object-fit: cover; border-radius: 6px;
+  border: 1px solid var(--bg-card);
+}
+.profile-evidence-row {
+  display: grid; grid-template-columns: 100px 1fr; gap: 6px;
+  font-size: .78rem; padding: 3px 0;
+  border-bottom: 1px dashed rgba(255,255,255,.04);
+}
+.profile-evidence-row .field { color: var(--accent-dim); }
+.profile-evidence-row .value { color: var(--text-dim); word-break: break-word; }
+.profile-evidence-site { color: var(--text); font-size: .82rem; margin: 8px 0 4px; font-weight: 600; }
+.btn-danger {
+  padding: 6px 14px; background: rgba(239,68,68,.1);
+  border: 1px solid rgba(239,68,68,.4); color: var(--red);
+  border-radius: 6px; font-size: .8rem; cursor: pointer;
+}
 
 .vault-banner {
   background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.3);
@@ -574,9 +627,18 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
         <span>Save to vault</span>
         <label class="toggle"><input type="checkbox" id="saveEvidence" onchange="syncAutoAccept()"><span class="slider"></span></label>
       </label>
-      <label class="option-group" title="Auto-apply high-confidence (≥80%) merge proposals; lower-confidence ones still queue for review">
+      <label class="option-group" title="Auto-apply high-confidence merge proposals; lower-confidence ones still queue for review">
         <span>Auto-accept</span>
-        <label class="toggle"><input type="checkbox" id="autoAccept" disabled><span class="slider"></span></label>
+        <label class="toggle"><input type="checkbox" id="autoAccept" disabled onchange="syncThresholdVisibility()"><span class="slider"></span></label>
+      </label>
+      <label class="option-group" id="thresholdGroup" style="display:none;" title="Auto-apply only when proposal score ≥ this threshold; lower-score proposals still queue.">
+        <span>Threshold</span>
+        <input type="range" id="autoAcceptThreshold" min="50" max="95" step="5" value="80" oninput="paintThresholdLabel()" style="width:90px;">
+        <span id="thresholdLabel" style="color:var(--accent); min-width:32px;">80%</span>
+      </label>
+      <label class="option-group" title="Fetch and store avatar bytes (encrypted in the vault) when a Claimed hit exposes one. Off by default — costs an extra HTTP fetch per hit.">
+        <span>Download avatars</span>
+        <label class="toggle"><input type="checkbox" id="downloadMedia" disabled><span class="slider"></span></label>
       </label>
       <span class="option-group" id="sitesCount" style="margin-left:auto; color:var(--accent);"></span>
     </div>
@@ -685,11 +747,16 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 </dialog>
 
 <!-- ── Profiles dialog ──────────────────────────────────────── -->
-<dialog id="profilesDialog" class="app-dialog" style="min-width:520px;">
+<dialog id="profilesDialog" class="app-dialog" style="min-width:720px;">
   <div class="dlg-body">
     <div class="dlg-title">Profiles</div>
-    <div class="dlg-sub" id="profilesSub">Accumulated evidence per profile.</div>
-    <div id="profilesList" style="max-height:60vh; overflow:auto;"></div>
+    <div class="dlg-sub" id="profilesSub">Pick a profile on the left to see its accumulated evidence.</div>
+    <div class="profile-detail-wrap">
+      <div class="profile-list-pane" id="profilesList"></div>
+      <div class="profile-detail-pane" id="profileDetail">
+        <div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profile selected.</p></div>
+      </div>
+    </div>
     <div class="dlg-row">
       <button class="btn-sm" onclick="closeDialog('profilesDialog')">Close</button>
     </div>
@@ -773,30 +840,133 @@ function paintVault() {
 async function openProfilesDialog() {
   if (vaultState.locked) { openVaultDialog(); return; }
   showDialog('profilesDialog');
-  const root = document.getElementById('profilesList');
-  root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  const listRoot   = document.getElementById('profilesList');
+  const detailRoot = document.getElementById('profileDetail');
+  listRoot.innerHTML   = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  detailRoot.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profile selected.</p></div>';
   try {
     const res  = await fetch('/api/profiles');
     const data = await res.json();
     const list = data.profiles || [];
     if (list.length === 0) {
-      root.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profiles yet. Run a search with "Save to vault" enabled.</p></div>';
+      listRoot.innerHTML = '<div class="empty-state" style="padding:20px"><div class="icon">&#x1f464;</div><p>No profiles yet.<br>Run a search with "Save to vault".</p></div>';
       return;
     }
-    root.innerHTML = list.map(p => `
-      <div class="pending-card">
+    listRoot.innerHTML = list.map(p => `
+      <div class="profile-list-item" data-id="${escHtml(p.id)}" onclick="selectProfile(${JSON.stringify(p.id)})">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <strong style="color:var(--text);">${escHtml(p.label)}</strong>
-          <span class="pending-score">${p.evidence_count} evidence rows</span>
+          <strong style="color:var(--text);">${escHtml(p.label || '(untitled)')}</strong>
+          <span class="pending-score">${p.evidence_count}</span>
         </div>
-        <div class="pending-rationale" style="font-size:.75rem;">
-          created ${escHtml(p.created_at.slice(0,19))} • updated ${escHtml(p.updated_at.slice(0,19))}
-        </div>
+        <div style="color:var(--text-muted); font-size:.7rem; margin-top:2px;">updated ${escHtml((p.updated_at || '').slice(0,19))}</div>
       </div>
     `).join('');
+    // Auto-select the first profile so the dialog isn't empty.
+    if (list[0]) selectProfile(list[0].id);
   } catch (e) {
-    root.innerHTML = `<div class="dlg-err">Failed to load: ${escHtml(e.message)}</div>`;
+    listRoot.innerHTML = `<div class="dlg-err">Failed to load: ${escHtml(e.message)}</div>`;
   }
+}
+
+let selectedProfileId = null;
+
+async function selectProfile(id) {
+  selectedProfileId = id;
+  // Highlight the selected master row.
+  document.querySelectorAll('.profile-list-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+  const detailRoot = document.getElementById('profileDetail');
+  detailRoot.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  try {
+    const res = await fetch(`/api/profiles/${encodeURIComponent(id)}`);
+    if (!res.ok) {
+      detailRoot.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
+      return;
+    }
+    const p = await res.json();
+    renderProfileDetail(p);
+  } catch (e) {
+    detailRoot.innerHTML = `<div class="dlg-err">Failed to load: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderProfileDetail(p) {
+  // Group evidence rows by site_name → field/value pairs.
+  const bySite = {};
+  for (const ev of (p.evidence || [])) {
+    if (!bySite[ev.site_name]) bySite[ev.site_name] = { url: ev.site_url, rows: [] };
+    bySite[ev.site_name].rows.push(ev);
+  }
+  const sitesHtml = Object.entries(bySite).map(([site, info]) => {
+    const rows = info.rows.map(ev => `
+      <div class="profile-evidence-row">
+        <span class="field">${escHtml(ev.field)}</span>
+        <span class="value">${renderFieldValue(ev.field, ev.value)}</span>
+      </div>
+    `).join('');
+    return `<div class="profile-evidence-site">
+      <a href="${escHtml(info.url)}" target="_blank" rel="noopener">${escHtml(site)}</a>
+    </div>${rows}`;
+  }).join('') || '<div style="color:var(--text-muted); font-size:.8rem;">No evidence yet.</div>';
+
+  const mediaHtml = (p.media && p.media.length > 0)
+    ? `<div class="profile-section">
+         <div class="profile-section-title">Media (${p.media.length})</div>
+         <div class="profile-media-grid">${p.media.map(m =>
+           `<a href="/api/media/${m.id}" target="_blank" rel="noopener" title="${escHtml(m.source_url)}">
+              <img src="/api/media/${m.id}" alt="" onerror="this.style.display='none'">
+            </a>`
+         ).join('')}</div>
+       </div>`
+    : '';
+
+  document.getElementById('profileDetail').innerHTML = `
+    <h3>${escHtml(p.label || '(untitled)')}</h3>
+    <div class="profile-meta">
+      id: ${escHtml(p.id)}<br>
+      created ${escHtml((p.created_at||'').slice(0,19))} • updated ${escHtml((p.updated_at||'').slice(0,19))}
+    </div>
+    ${mediaHtml}
+    <div class="profile-section">
+      <div class="profile-section-title">Note</div>
+      <textarea class="profile-note-area" id="profileNoteArea"
+        placeholder="Free-form notes — saved encrypted in the vault"
+        onblur="saveProfileNote()">${escHtml(p.note || '')}</textarea>
+    </div>
+    <div class="profile-section">
+      <div class="profile-section-title">Evidence (${(p.evidence||[]).length})</div>
+      ${sitesHtml}
+    </div>
+    <div class="profile-section" style="display:flex; justify-content:flex-end;">
+      <button class="btn-danger" onclick="confirmDeleteProfile()">Delete profile</button>
+    </div>
+  `;
+}
+
+async function saveProfileNote() {
+  if (!selectedProfileId) return;
+  const note = document.getElementById('profileNoteArea').value;
+  try {
+    const res = await fetch(`/api/profiles/${encodeURIComponent(selectedProfileId)}/note`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note })
+    });
+    if (!res.ok) showToast('Save note failed: HTTP ' + res.status);
+  } catch (e) { showToast('Save note failed: ' + e.message); }
+}
+
+async function confirmDeleteProfile() {
+  if (!selectedProfileId) return;
+  if (!confirm('Delete this profile and all its evidence + media? This cannot be undone.')) return;
+  try {
+    const res = await fetch(`/api/profiles/${encodeURIComponent(selectedProfileId)}`, { method: 'DELETE' });
+    if (!res.ok) { showToast('Delete failed: HTTP ' + res.status); return; }
+    selectedProfileId = null;
+    // Refresh the list and clear the detail.
+    openProfilesDialog();
+  } catch (e) { showToast('Delete failed: ' + e.message); }
 }
 
 function openVaultDialog() {
@@ -863,11 +1033,28 @@ async function submitVaultUnlock() {
 function syncAutoAccept() {
   const save  = document.getElementById('saveEvidence');
   const auto  = document.getElementById('autoAccept');
+  const media = document.getElementById('downloadMedia');
   const usable = vaultState.initialized && !vaultState.locked;
-  // Auto-accept only makes sense when we're actually saving.
-  auto.disabled = !(save.checked && usable);
-  if (!save.checked || !usable) auto.checked = false;
+  // Auto-accept and media download only make sense when we're actually saving.
+  auto.disabled  = !(save.checked && usable);
+  media.disabled = !(save.checked && usable);
+  if (!save.checked || !usable) {
+    auto.checked  = false;
+    media.checked = false;
+  }
+  syncThresholdVisibility();
   paintBannerVisibility();
+}
+
+function syncThresholdVisibility() {
+  const auto  = document.getElementById('autoAccept');
+  const group = document.getElementById('thresholdGroup');
+  group.style.display = auto.checked ? '' : 'none';
+}
+
+function paintThresholdLabel() {
+  const v = document.getElementById('autoAcceptThreshold').value;
+  document.getElementById('thresholdLabel').textContent = v + '%';
 }
 function paintBannerVisibility() {
   const save = document.getElementById('saveEvidence');
@@ -990,10 +1177,13 @@ function startSearch() {
   const proxy         = document.getElementById('proxy').value.trim();
   const saveEvidence  = document.getElementById('saveEvidence').checked;
   const autoAccept    = document.getElementById('autoAccept').checked;
+  const downloadMedia = document.getElementById('downloadMedia').checked;
+  const thresholdPct  = parseInt(document.getElementById('autoAcceptThreshold').value, 10) || 80;
   let url = `/api/search?usernames=${encodeURIComponent(usernames.join('\n'))}&timeout=${timeout}&nsfw=${nsfw}`;
-  if (proxy)        url += `&proxy=${encodeURIComponent(proxy)}`;
-  if (saveEvidence) url += `&save_evidence=true`;
-  if (autoAccept)   url += `&auto_accept=true`;
+  if (proxy)         url += `&proxy=${encodeURIComponent(proxy)}`;
+  if (saveEvidence)  url += `&save_evidence=true`;
+  if (autoAccept)    url += `&auto_accept=true&auto_accept_threshold=${(thresholdPct/100).toFixed(2)}`;
+  if (downloadMedia) url += `&download_media=true`;
 
   eventSource = new EventSource(url);
 
@@ -1189,15 +1379,11 @@ function resultRowHtml(r) {
   let hasExtracted = false;
   if (r.extracted && Object.keys(r.extracted).length > 0) {
     hasExtracted = true;
-    const dl = Object.entries(r.extracted).map(([k, v]) => {
-      const valStr = Array.isArray(v) ? v.join(', ') : v;
-      return `<dt>${escHtml(k)}</dt><dd>${escHtml(valStr)}</dd>`;
-    }).join('');
-    drawerHtml = `<dl class="extracted-panel">${dl}</dl>`;
+    drawerHtml = renderExtractedDrawer(r.extracted);
   }
   const rowCls = hasExtracted ? 'result-row has-extracted' : 'result-row';
   const onClick = hasExtracted
-    ? ` onclick="this.classList.toggle('expanded')"`
+    ? ` onclick="event.target.closest('a, button') || this.classList.toggle('expanded')"`
     : '';
 
   return `<div class="${rowCls}"${onClick}>
@@ -1208,6 +1394,60 @@ function resultRowHtml(r) {
     ${copyHtml}
     ${drawerHtml}
   </div>`;
+}
+
+// ── Extracted-fields drawer ──────────────────────────────────────────────────
+// Hosts where `yt-dlp` is known to work — we show a copy button next to
+// matching external_links entries. Conservative list; users can always
+// copy URLs by hand if their host isn't here.
+const YTDLP_HOSTS = [
+  'youtube.com','youtu.be','tiktok.com','twitter.com','x.com',
+  'instagram.com','twitch.tv','vimeo.com','reddit.com','soundcloud.com',
+  'rumble.com','dailymotion.com','bitchute.com','odysee.com','facebook.com',
+];
+function looksMediaUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./,'');
+    return YTDLP_HOSTS.some(h => host === h || host.endsWith('.' + h));
+  } catch { return false; }
+}
+function renderExtractedDrawer(ex) {
+  // Pull out avatar_url for the thumbnail slot.
+  let thumbHtml = '';
+  const avatar = ex.avatar_url;
+  if (typeof avatar === 'string' && avatar.length > 0) {
+    thumbHtml = `<img class="extracted-thumb" src="${escHtml(avatar)}" alt="" referrerpolicy="no-referrer" onerror="this.style.display='none'">`;
+  }
+  // Everything else (including avatar_url as a textual row) goes in the dl list.
+  const dl = Object.entries(ex).map(([k, v]) => {
+    let valStr = '';
+    if (Array.isArray(v)) {
+      valStr = v.map(item => renderFieldValue(k, item)).join(', ');
+    } else {
+      valStr = renderFieldValue(k, v);
+    }
+    return `<dt>${escHtml(k)}</dt><dd>${valStr}</dd>`;
+  }).join('');
+  return `<div class="extracted-panel">
+    ${thumbHtml}
+    <dl class="extracted-fields">${dl}</dl>
+  </div>`;
+}
+function renderFieldValue(field, val) {
+  const v = String(val);
+  // Render URL-shaped values as anchors; tack on a yt-dlp button on media hosts.
+  const isUrl = /^https?:\/\//i.test(v);
+  if (!isUrl) return escHtml(v);
+  const a = `<a href="${escHtml(v)}" target="_blank" rel="noopener">${escHtml(v)}</a>`;
+  if (looksMediaUrl(v)) {
+    return a + ` <button class="ytdlp-btn" type="button" onclick="copyYtdlp(${JSON.stringify(v)})" title="Copy yt-dlp command">&#x2398; yt-dlp</button>`;
+  }
+  return a;
+}
+function copyYtdlp(url) {
+  const cmd = `yt-dlp ${JSON.stringify(url)}`;
+  navigator.clipboard.writeText(cmd).then(() => showToast('yt-dlp command copied'));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
