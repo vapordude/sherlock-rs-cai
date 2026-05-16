@@ -526,6 +526,24 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
 }
 .vault-banner.show { display: block; }
 
+.sites-meta-banner {
+  background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.3);
+  color: var(--red); padding: 8px 12px; border-radius: 8px;
+  font-size: .8rem; margin: 0 0 12px; display: none;
+}
+
+.audit-row {
+  display: grid; grid-template-columns: 120px 140px 1fr;
+  gap: 8px; padding: 6px 0; font-size: .75rem;
+  border-bottom: 1px dashed rgba(255,255,255,.04);
+}
+.audit-row .at { color: var(--text-muted); }
+.audit-row .action {
+  color: var(--accent-dim); font-weight: 600; text-transform: uppercase;
+  letter-spacing: .5px; font-size: .7rem;
+}
+.audit-row .detail { color: var(--text-dim); word-break: break-word; }
+
 /* ── Footer ─────────────────────────────────────────────────── */
 .footer {
   text-align: center; padding: 30px 0 10px;
@@ -560,6 +578,9 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   </button>
   <button class="vault-pill" id="profilesPill" onclick="openProfilesDialog()" title="Saved profiles" style="display:none;">
     &#x1f464; <span id="profilesCount">Profiles</span>
+  </button>
+  <button class="vault-pill" id="auditPill" onclick="openAuditDialog()" title="Audit log — every vault action (init, unlock, auto-accept, review)" style="display:none;">
+    &#x1f4dc; Audit
   </button>
   <button class="vault-pill uninit" id="vaultPill" onclick="openVaultDialog()" title="Vault">
     &#x1f512; <span id="vaultPillLabel">Vault</span>
@@ -624,6 +645,9 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
       <button class="btn btn-primary" onclick="updateDb()">Retry Download</button>
     </div>
   </div>
+
+  <!-- Sites-DB error banner — populated by checkSitesMeta() -->
+  <div class="sites-meta-banner" id="sitesMetaBanner"></div>
 
   <!-- Search -->
   <div class="card" id="searchCard" style="display:none;">
@@ -803,6 +827,18 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   </div>
 </dialog>
 
+<!-- ── Audit log dialog ─────────────────────────────────────── -->
+<dialog id="auditDialog" class="app-dialog" style="min-width:560px;">
+  <div class="dlg-body">
+    <div class="dlg-title">Audit log</div>
+    <div class="dlg-sub">Every action against the vault — most recent first. Lives encrypted alongside the rest of the vault.</div>
+    <div id="auditList" style="max-height:55vh; overflow:auto;"></div>
+    <div class="dlg-row">
+      <button class="btn-sm" onclick="closeDialog('auditDialog')">Close</button>
+    </div>
+  </div>
+</dialog>
+
 <!-- ── Profiles dialog ──────────────────────────────────────── -->
 <dialog id="profilesDialog" class="app-dialog" style="min-width:720px;">
   <div class="dlg-body">
@@ -875,16 +911,20 @@ function paintVault() {
   const label = document.getElementById('vaultPillLabel');
   const banner = document.getElementById('vaultBanner');
   const profilesPill = document.getElementById('profilesPill');
+  const auditPill    = document.getElementById('auditPill');
   pill.classList.remove('locked','unlocked','uninit');
   if (!vaultState.initialized) {
     pill.classList.add('uninit'); label.textContent = 'Set up vault';
     profilesPill.style.display = 'none';
+    auditPill.style.display    = 'none';
   } else if (vaultState.locked) {
     pill.classList.add('locked'); label.textContent = 'Unlock vault';
     profilesPill.style.display = 'none';
+    auditPill.style.display    = 'none';
   } else {
     pill.classList.add('unlocked'); label.textContent = 'Vault unlocked';
     profilesPill.style.display = 'flex';
+    auditPill.style.display    = 'flex';
   }
   // Save-to-vault toggle banner: only show when save is enabled but vault is unusable.
   const save = document.getElementById('saveEvidence');
@@ -1105,13 +1145,56 @@ function openSimilarProfile(id) {
 async function confirmDeleteProfile() {
   if (!selectedProfileId) return;
   if (!confirm('Delete this profile and all its evidence + media? This cannot be undone.')) return;
+  const deleted = selectedProfileId;
   try {
-    const res = await fetch(`/api/profiles/${encodeURIComponent(selectedProfileId)}`, { method: 'DELETE' });
+    const res = await fetch(`/api/profiles/${encodeURIComponent(deleted)}`, { method: 'DELETE' });
     if (!res.ok) { showToast('Delete failed: HTTP ' + res.status); return; }
+    showToast('Profile deleted');
     selectedProfileId = null;
-    // Refresh the list and clear the detail.
-    openProfilesDialog();
+    // Refresh the list; auto-select the first remaining profile so the
+    // detail pane doesn't get stuck showing the just-deleted row.
+    await openProfilesDialog();
+    const firstItem = document.querySelector('.profile-list-item');
+    if (firstItem && firstItem.dataset.id) {
+      selectProfile(firstItem.dataset.id);
+    } else {
+      // No profiles left — clear the detail pane explicitly.
+      const detail = document.getElementById('profileDetail');
+      if (detail) {
+        detail.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profiles yet.</p></div>';
+      }
+    }
   } catch (e) { showToast('Delete failed: ' + e.message); }
+}
+
+// ── Audit log viewer ─────────────────────────────────────────────────────────
+async function openAuditDialog() {
+  if (vaultState.locked) { openVaultDialog(); return; }
+  showDialog('auditDialog');
+  const root = document.getElementById('auditList');
+  root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
+  try {
+    const res  = await fetch('/api/audit');
+    if (!res.ok) {
+      root.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
+      return;
+    }
+    const data = await res.json();
+    const rows = data.audit || [];
+    if (rows.length === 0) {
+      root.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f4dc;</div><p>No audit entries yet.</p></div>';
+      return;
+    }
+    root.innerHTML = rows.map(r => `
+      <div class="audit-row">
+        <span class="at">${escHtml((r.at || '').slice(0,19))}</span>
+        <span class="action">${escHtml(r.action || '')}</span>
+        <span class="detail">${escHtml(r.detail || '')}</span>
+      </div>
+    `).join('');
+  } catch (e) {
+    root.innerHTML = `<div class="dlg-err">${escHtml(e.message)}</div>`;
+  }
 }
 
 function openVaultDialog() {
@@ -1276,8 +1359,31 @@ async function acceptAllPending() {
   }
 }
 
-// Bootstrap vault
+// Bootstrap vault — fetch initial state, then poll every 60s so an
+// idle-lock event server-side reflects in the UI without manual refresh.
 checkVault();
+setInterval(checkVault, 60_000);
+
+// Bootstrap sites-meta — surface partial-fetch errors (e.g. WMN unreachable)
+// in a header banner so the user knows why their site count is low.
+checkSitesMeta();
+async function checkSitesMeta() {
+  try {
+    const res  = await fetch('/api/sites/meta');
+    if (!res.ok) return;
+    const meta = await res.json();
+    if (!meta) return;
+    const banner = document.getElementById('sitesMetaBanner');
+    if (!banner) return;
+    const errors = meta.errors || [];
+    if (errors.length === 0) {
+      banner.style.display = 'none';
+      return;
+    }
+    banner.innerHTML = `&#x26a0; Site database loaded with errors: <strong>${errors.map(escHtml).join('; ')}</strong>. Site count may be lower than expected. Click <em>Update DB</em> to retry.`;
+    banner.style.display = '';
+  } catch { /* ignore */ }
+}
 
 // ── Parse usernames ───────────────────────────────────────────────────────────
 function parseUsernames(text) {
@@ -1377,12 +1483,19 @@ function startSearch() {
       const data = JSON.parse(e.data || '{}');
       if (data && data.vault) {
         const v = data.vault;
-        const parts = [];
-        if (v.auto_accepted) parts.push(`${v.auto_accepted} auto-accepted`);
-        if (v.queued)        parts.push(`${v.queued} queued for review`);
-        if (parts.length)    showToast('Vault: ' + parts.join(', '));
+        if (v.save_blocked) {
+          showToast('Vault locked — nothing was saved');
+        } else {
+          const parts = [];
+          if (v.auto_accepted) parts.push(`${v.auto_accepted} auto-accepted`);
+          if (v.queued)        parts.push(`${v.queued} queued for review`);
+          if (parts.length)    showToast('Vault: ' + parts.join(', '));
+        }
       }
     } catch { /* ignore */ }
+    // Vault state may have changed via auto-lock during the search;
+    // refresh status alongside the review badge.
+    checkVault();
     refreshReviewBadge();
     searchComplete();
   });

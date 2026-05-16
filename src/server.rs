@@ -67,7 +67,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/search", get(search_handler))
         .route("/api/export/csv", post(export_csv_handler))
         .route("/api/export/txt", post(export_txt_handler))
-        .route("/api/update-db", post(update_db_handler));
+        .route("/api/update-db", post(update_db_handler))
+        .route("/api/sites/meta", get(sites_meta_handler));
 
     #[cfg(feature = "vault")]
     let router = router
@@ -185,6 +186,12 @@ struct SearchTaskArgs {
     sse_tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     #[cfg(feature = "vault")]
     vault_ctx: Option<VaultScanCtx>,
+    /// True when the user asked to persist evidence (`save_evidence=true`)
+    /// but the vault was locked or uninitialized at scan start. Surfaces
+    /// in the SSE `done` event so the UI can toast "nothing saved" rather
+    /// than silently dropping the request.
+    #[cfg(feature = "vault")]
+    vault_save_blocked: bool,
 }
 
 #[cfg(feature = "vault")]
@@ -207,6 +214,8 @@ fn spawn_search_task(args: SearchTaskArgs) {
         sse_tx,
         #[cfg(feature = "vault")]
         vault_ctx,
+        #[cfg(feature = "vault")]
+        vault_save_blocked,
     } = args;
 
     tokio::spawn(async move {
@@ -376,8 +385,13 @@ fn spawn_search_task(args: SearchTaskArgs) {
                     "scan_id":       sid,
                     "auto_accepted": auto_accepted,
                     "queued":        queued,
+                    "save_blocked":  false,
                 }))
             }
+            _ if vault_save_blocked => Some(serde_json::json!({
+                "save_blocked": true,
+                "reason": "vault locked — searches won't persist until you unlock",
+            })),
             _ => None,
         };
         #[cfg(not(feature = "vault"))]
@@ -420,18 +434,24 @@ async fn search_handler(
         .count();
 
     // Capture vault context only when the user opted in AND the vault is
-    // unlocked. Locked vault silently skips evidence writes — the search
-    // still runs, the UI shows a "vault locked" banner.
+    // unlocked. If the user asked to save but the vault is locked, we still
+    // run the search but flag the situation so the SSE done event can
+    // explain why nothing got persisted.
     #[cfg(feature = "vault")]
-    let vault_ctx = if params.save_evidence && !state.vault.is_locked().await {
-        Some(VaultScanCtx {
-            vault: state.vault.clone(),
-            auto_accept: params.auto_accept,
-            auto_accept_threshold: params.auto_accept_threshold,
-            download_media: params.download_media,
-        })
-    } else {
-        None
+    let (vault_ctx, vault_save_blocked) = {
+        if params.save_evidence && !state.vault.is_locked().await {
+            (
+                Some(VaultScanCtx {
+                    vault: state.vault.clone(),
+                    auto_accept: params.auto_accept,
+                    auto_accept_threshold: params.auto_accept_threshold,
+                    download_media: params.download_media,
+                }),
+                false,
+            )
+        } else {
+            (None, params.save_evidence)
+        }
     };
 
     spawn_search_task(SearchTaskArgs {
@@ -446,6 +466,8 @@ async fn search_handler(
         sse_tx,
         #[cfg(feature = "vault")]
         vault_ctx,
+        #[cfg(feature = "vault")]
+        vault_save_blocked,
     });
 
     Sse::new(ReceiverStream::new(sse_rx)).keep_alive(KeepAlive::default())
@@ -488,6 +510,14 @@ struct UpdateResponse {
     success: bool,
     sites_count: usize,
     error: Option<String>,
+}
+
+/// Returns the per-source counts and error log from the last
+/// `download_sites()` run. The frontend uses this on page load to surface
+/// partial-fetch failures (e.g. WMN unreachable, user stuck on
+/// Sherlock-only cache) instead of leaving them silent in a sidecar file.
+async fn sites_meta_handler() -> Json<serde_json::Value> {
+    Json(sites::read_meta().await.unwrap_or(serde_json::Value::Null))
 }
 
 /// Restarts the target definition parser forcing a hard download replacing all in-memory structures locally.
