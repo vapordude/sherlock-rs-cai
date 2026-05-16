@@ -5,8 +5,59 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Mutex as TokioMutex, Semaphore};
 use tokio::time::sleep;
+
+/// Minimum gap between consecutive HTTP requests to the SAME host. Defends
+/// the user from Cloudflare's "obvious bot" thresholds — back-to-back hits
+/// to one host trigger WAF challenges far more often than spaced hits do.
+/// Different hosts are unaffected (the global semaphore is still 20).
+const PER_HOST_DWELL: Duration = Duration::from_millis(250);
+
+/// Gates concurrent access to a given hostname so we don't hammer the same
+/// site faster than `PER_HOST_DWELL` allows. The outer map is held only
+/// briefly to look up / insert the per-host entry; the per-host
+/// `Mutex<Instant>` is held across the sleep so other workers on the same
+/// host queue up cleanly.
+#[derive(Default)]
+pub struct DomainGates {
+    inner: TokioMutex<HashMap<String, Arc<TokioMutex<Instant>>>>,
+}
+
+impl DomainGates {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    async fn gate(&self, host: &str) {
+        let entry = {
+            let mut map = self.inner.lock().await;
+            map.entry(host.to_string())
+                .or_insert_with(|| {
+                    // First seen host — initialise the gate "in the past"
+                    // so the very first request fires immediately.
+                    Arc::new(TokioMutex::new(Instant::now() - PER_HOST_DWELL))
+                })
+                .clone()
+        };
+        // Held across the sleep — serialises per-host concurrency without
+        // blocking unrelated hosts.
+        let mut last = entry.lock().await;
+        let elapsed = last.elapsed();
+        if elapsed < PER_HOST_DWELL {
+            sleep(PER_HOST_DWELL - elapsed).await;
+        }
+        *last = Instant::now();
+    }
+}
+
+/// Best-effort host extraction. Returns `None` only when the URL is
+/// completely malformed — the gate is skipped in that case.
+fn host_of(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+}
 
 /// ── 25 real browser User-Agents ─────────────────────────────────────────────
 /// A curated list of real, modern browser `User-Agent` strings used
@@ -114,6 +165,10 @@ pub async fn check_username(
     let client_no_redir = client_no_redir_builder.build().unwrap_or_default();
 
     let semaphore = Arc::new(Semaphore::new(20));
+    // One DomainGates instance per scan — its in-memory state lives only
+    // for the duration of this check_username call, so two scans started
+    // back-to-back can both hit the same host without the second waiting.
+    let gates = DomainGates::new();
     let (result_tx, mut result_rx) = mpsc::channel::<QueryResult>(300);
 
     for (name, site) in sites.iter() {
@@ -147,11 +202,13 @@ pub async fn check_username(
         let c = client.clone();
         let cnr = client_no_redir.clone();
         let sem = semaphore.clone();
+        let gates = gates.clone();
         let rtx = result_tx.clone();
 
         tokio::spawn(async move {
             let _permit = sem.acquire().await.expect("Semaphore closed unexpectedly");
-            let result = check_site_with_retry(&name, &site, &username, &c, &cnr).await;
+            let result =
+                check_site_with_retry(&name, &site, &username, &c, &cnr, &gates).await;
             let _ = rtx.send(result).await;
         });
     }
@@ -175,6 +232,7 @@ async fn check_site_with_retry(
     username: &str,
     client: &reqwest::Client,
     client_no_redir: &reqwest::Client,
+    gates: &DomainGates,
 ) -> QueryResult {
     const MAX_ATTEMPTS: u32 = 3;
     let mut last: Option<QueryResult> = None;
@@ -185,7 +243,7 @@ async fn check_site_with_retry(
             sleep(Duration::from_millis(500 * (1u64 << (attempt - 1)))).await;
         }
 
-        let result = check_site(name, site, username, client, client_no_redir).await;
+        let result = check_site(name, site, username, client, client_no_redir, gates).await;
 
         let is_network_error = matches!(result.status, QueryStatus::Unknown)
             && result
@@ -232,6 +290,7 @@ async fn check_site(
     username: &str,
     client: &reqwest::Client,
     client_no_redir: &reqwest::Client,
+    gates: &DomainGates,
 ) -> QueryResult {
     let url = site.format_url(username);
     let probe_url = site
@@ -239,6 +298,13 @@ async fn check_site(
         .as_ref()
         .map(|u| u.replace("{}", username))
         .unwrap_or_else(|| url.clone());
+
+    // Per-host dwell. Each unique site responds immediately on first hit;
+    // back-to-back hits to the same host (rare in this DB, but happens with
+    // shared CDNs like *.statuspage.io) get a 250 ms spacer to dodge WAFs.
+    if let Some(host) = host_of(&probe_url) {
+        gates.gate(&host).await;
+    }
 
     let active_client = if site.error_type == "response_url" {
         client_no_redir
