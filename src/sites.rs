@@ -133,10 +133,10 @@ pub struct SiteData {
     #[serde(default)]
     pub source: SiteSource,
     /// Per-extractor compiled selector + regex, rebuilt at load time.
-    /// Skipped during (de)serialization for the same reason as `compiled_regex`.
+    /// Skipped during (de)serialization for the same reason as
+    /// `compiled_regex`. Consumed by `checker.rs::check_site` →
+    /// `extract::run_extractors` on every `Claimed` hit.
     #[serde(skip)]
-    // Consumed by checker.rs / extract.rs in subsequent commits.
-    #[allow(dead_code)]
     pub compiled_extractors: Vec<CompiledExtractor>,
 }
 
@@ -197,9 +197,8 @@ fn is_false(b: &bool) -> bool {
 }
 
 /// Compiled form of `Extractor` — built once at load time so the request
-/// hot path doesn't re-parse CSS selectors or regex.
-// Consumed by extract.rs in a subsequent commit.
-#[allow(dead_code)]
+/// hot path doesn't re-parse CSS selectors or regex. Consumed by
+/// `extract::run_extractors` / `collect`.
 #[derive(Clone, Debug)]
 pub struct CompiledExtractor {
     pub field: String,
@@ -255,6 +254,17 @@ pub async fn load_sites() -> Result<HashMap<String, SiteData>> {
         return Ok(sites);
     }
     download_sites().await
+}
+
+/// Read the meta sidecar (`data.merged.meta.json`) — fetch counts and
+/// per-source errors from the last `download_sites()` run. Used by the
+/// `/api/sites/meta` endpoint so the UI can show users when, e.g., the
+/// WMN fetch failed and they're stuck on a Sherlock-only cache.
+/// Returns `None` (not an error) when the file doesn't exist yet.
+pub async fn read_meta() -> Option<serde_json::Value> {
+    let path = data_dir().join("data.merged.meta.json");
+    let bytes = tokio::fs::read(&path).await.ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Fetches all configured upstreams in parallel, merges them by normalized
