@@ -567,6 +567,13 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   .btn-col { flex-direction: row; }
   .result-row { grid-template-columns: 1fr 100px; }
   .result-url, .result-time, .copy-btn { display: none; }
+  /* Top-bar pill row gets crowded on phones — let it stack and shrink. */
+  .top-bar { flex-wrap: wrap; max-width: calc(100% - 32px); justify-content: flex-end; }
+  .vault-pill, .review-pill, .update-btn { font-size: .72rem; padding: 6px 10px; }
+  /* Results-header filter controls also need to wrap on narrow screens. */
+  .results-header { flex-wrap: wrap; gap: 6px; }
+  .results-header .left { flex-wrap: wrap; gap: 6px; }
+  .filter-input, .sort-select { flex: 1 1 120px; min-width: 0; }
 }
 </style>
 </head>
@@ -894,16 +901,43 @@ let vaultState = { initialized: false, locked: true };
 async function checkVault() {
   try {
     const res = await fetch('/api/vault/status');
-    if (!res.ok) return; // vault feature off — leave defaults; pill stays 'uninit'
+    if (res.status === 404) {
+      // Vault feature compiled out (--no-default-features build). Hide
+      // every pill that depends on it instead of leaving them visible
+      // but non-functional.
+      ['vaultPill','profilesPill','auditPill','reviewPill'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = 'none';
+      });
+      return;
+    }
+    if (!res.ok) return;
     vaultState = await res.json();
     paintVault();
-    if (!vaultState.initialized) {
-      // First-run nudge — don't auto-open the dialog on every page load;
-      // make the pill blink instead via the .uninit class so the user
-      // discovers it when they're ready.
-    }
     refreshReviewBadge();
   } catch { /* offline, no vault */ }
+}
+
+// Any /api/* response with HTTP 423 Locked means the vault auto-locked
+// while a dialog was open. Close every stale dialog and re-prompt for the
+// passphrase so the user isn't stuck looking at an empty / error pane.
+function handleVaultLockedDuringDialog() {
+  document.querySelectorAll('dialog[open]').forEach(d => {
+    if (d.id !== 'vaultUnlockDialog' && d.id !== 'vaultInitDialog') d.close();
+  });
+  showToast('Vault auto-locked — please unlock');
+  checkVault().then(() => openVaultDialog());
+}
+
+// Wrapper around fetch() that auto-handles the 423 Locked case. Use for
+// every call to a vault-gated endpoint so users don't get stuck staring
+// at a "Locked" payload after the server-side auto-lock fires.
+async function vaultFetch(input, init) {
+  const res = await fetch(input, init);
+  if (res.status === 423) {
+    handleVaultLockedDuringDialog();
+  }
+  return res;
 }
 
 function paintVault() {
@@ -942,7 +976,7 @@ async function openProfilesDialog() {
   listRoot.innerHTML   = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
   detailRoot.innerHTML = '<div class="empty-state" style="padding:30px"><div class="icon">&#x1f464;</div><p>No profile selected.</p></div>';
   try {
-    const res  = await fetch('/api/profiles');
+    const res  = await vaultFetch('/api/profiles');
     const data = await res.json();
     const list = data.profiles || [];
     if (list.length === 0) {
@@ -976,7 +1010,7 @@ async function selectProfile(id) {
   const detailRoot = document.getElementById('profileDetail');
   detailRoot.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
   try {
-    const res = await fetch(`/api/profiles/${encodeURIComponent(id)}`);
+    const res = await vaultFetch(`/api/profiles/${encodeURIComponent(id)}`);
     if (!res.ok) {
       detailRoot.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
       return;
@@ -1048,7 +1082,7 @@ async function saveProfileNote() {
   if (!selectedProfileId) return;
   const note = document.getElementById('profileNoteArea').value;
   try {
-    const res = await fetch(`/api/profiles/${encodeURIComponent(selectedProfileId)}/note`, {
+    const res = await vaultFetch(`/api/profiles/${encodeURIComponent(selectedProfileId)}/note`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ note })
@@ -1095,7 +1129,7 @@ async function refreshSimilar() {
   const root   = document.getElementById('similarList');
   root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
   try {
-    const res = await fetch(`/api/media/${similarSeedId}/${path}?max_distance=${encodeURIComponent(dist)}`);
+    const res = await vaultFetch(`/api/media/${similarSeedId}/${path}?max_distance=${encodeURIComponent(dist)}`);
     if (!res.ok) {
       root.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
       return;
@@ -1147,7 +1181,7 @@ async function confirmDeleteProfile() {
   if (!confirm('Delete this profile and all its evidence + media? This cannot be undone.')) return;
   const deleted = selectedProfileId;
   try {
-    const res = await fetch(`/api/profiles/${encodeURIComponent(deleted)}`, { method: 'DELETE' });
+    const res = await vaultFetch(`/api/profiles/${encodeURIComponent(deleted)}`, { method: 'DELETE' });
     if (!res.ok) { showToast('Delete failed: HTTP ' + res.status); return; }
     showToast('Profile deleted');
     selectedProfileId = null;
@@ -1174,7 +1208,7 @@ async function openAuditDialog() {
   const root = document.getElementById('auditList');
   root.innerHTML = '<div class="empty-state" style="padding:20px"><div class="spinner"></div></div>';
   try {
-    const res  = await fetch('/api/audit');
+    const res  = await vaultFetch('/api/audit');
     if (!res.ok) {
       root.innerHTML = `<div class="dlg-err">HTTP ${res.status}</div>`;
       return;
@@ -1295,7 +1329,7 @@ function paintBannerVisibility() {
 // ── Pending review badge + dialog ─────────────────────────────────────────────
 async function refreshReviewBadge() {
   try {
-    const res  = await fetch('/api/review/count');
+    const res  = await vaultFetch('/api/review/count');
     if (!res.ok) return;
     const data = await res.json();
     const pill = document.getElementById('reviewPill');
@@ -1310,7 +1344,7 @@ async function openReviewDialog() {
   if (vaultState.locked) { openVaultDialog(); return; }
   showDialog('reviewDialog');
   try {
-    const res  = await fetch('/api/review/pending');
+    const res  = await vaultFetch('/api/review/pending');
     const data = await res.json();
     renderReviewList(data.pending || []);
   } catch (e) {
@@ -1342,7 +1376,7 @@ function renderReviewList(items) {
 
 async function reviewAction(id, kind) {
   try {
-    const res = await fetch(`/api/review/${id}/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const res = await vaultFetch(`/api/review/${id}/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     if (!res.ok) { showToast(`${kind} failed: HTTP ${res.status}`); return; }
     // Remove the card from the list.
     const card = document.querySelector(`.pending-card[data-id="${id}"]`);
@@ -1438,8 +1472,21 @@ function startSearch() {
 
   eventSource = new EventSource(url);
 
-  eventSource.addEventListener('username_start', e => {
-    const data = JSON.parse(e.data);
+  // Defensive: a malformed SSE frame should not break the listener chain.
+  // Wrap every JSON.parse + handler body so one bad event doesn't kill the
+  // whole search session.
+  function safeOn(name, fn) {
+    eventSource.addEventListener(name, e => {
+      let data;
+      try { data = JSON.parse(e.data || '{}'); }
+      catch (err) { console.warn('[sse] bad ' + name + ' payload:', err); return; }
+      try { fn(data); }
+      catch (err) { console.warn('[sse] ' + name + ' handler threw:', err); }
+    });
+  }
+
+  safeOn('username_start', data => {
+    if (!tabState[data.username]) return;
     tabState[data.username].total = data.total;
 
     // Pulse the searching tab
@@ -1447,12 +1494,10 @@ function startSearch() {
     const tab = document.getElementById(tabId(data.username));
     if (tab) tab.classList.add('tab-searching');
 
-    // Auto-switch only if no tab is manually active yet, or switch to current
     switchTab(data.username);
   });
 
-  eventSource.addEventListener('result', e => {
-    const d = JSON.parse(e.data);
+  safeOn('result', d => {
     const u = d.username;
     if (!tabState[u]) return;
 
@@ -1471,28 +1516,25 @@ function startSearch() {
     }
   });
 
-  eventSource.addEventListener('username_done', e => {
-    const data = JSON.parse(e.data);
+  safeOn('username_done', data => {
+    if (!tabState[data.username]) return;
     tabState[data.username].done = true;
     const tab = document.getElementById(tabId(data.username));
     if (tab) tab.classList.remove('tab-searching');
   });
 
-  eventSource.addEventListener('done', e => {
-    try {
-      const data = JSON.parse(e.data || '{}');
-      if (data && data.vault) {
-        const v = data.vault;
-        if (v.save_blocked) {
-          showToast('Vault locked — nothing was saved');
-        } else {
-          const parts = [];
-          if (v.auto_accepted) parts.push(`${v.auto_accepted} auto-accepted`);
-          if (v.queued)        parts.push(`${v.queued} queued for review`);
-          if (parts.length)    showToast('Vault: ' + parts.join(', '));
-        }
+  safeOn('done', data => {
+    if (data && data.vault) {
+      const v = data.vault;
+      if (v.save_blocked) {
+        showToast('Vault locked — nothing was saved');
+      } else {
+        const parts = [];
+        if (v.auto_accepted) parts.push(`${v.auto_accepted} auto-accepted`);
+        if (v.queued)        parts.push(`${v.queued} queued for review`);
+        if (parts.length)    showToast('Vault: ' + parts.join(', '));
       }
-    } catch { /* ignore */ }
+    }
     // Vault state may have changed via auto-lock during the search;
     // refresh status alongside the review badge.
     checkVault();
@@ -1501,6 +1543,13 @@ function startSearch() {
   });
   eventSource.onerror = () => { if (isSearching) searchComplete(); };
 }
+
+// Defensive: close any open SSE stream when the tab unloads. Modern
+// browsers do this for us, but explicit cleanup avoids the rare zombie
+// connection from a bfcache restore.
+window.addEventListener('beforeunload', () => {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+});
 
 function stopSearch() {
   if (eventSource) { eventSource.close(); eventSource = null; }
@@ -1614,7 +1663,21 @@ function renderResults() {
     return (statusOrder[a.status] ?? 5) - (statusOrder[b.status] ?? 5);
   });
 
+  // Preserve focus + cursor position on the filter input, since the SSE
+  // stream rerenders the grid on every result event and a naive innerHTML
+  // replace would steal focus mid-typing.
+  const filterInput = document.getElementById('filterInput');
+  const hadFocus = document.activeElement === filterInput;
+  const selStart = hadFocus ? filterInput.selectionStart : null;
+  const selEnd   = hadFocus ? filterInput.selectionEnd   : null;
+
   document.getElementById('resultsGrid').innerHTML = filtered.map(resultRowHtml).join('');
+
+  if (hadFocus) {
+    filterInput.focus();
+    if (selStart !== null) filterInput.setSelectionRange(selStart, selEnd);
+  }
+
   // Hidden-count hint so the user knows the filter is active.
   const hint = document.getElementById('resultsHiddenHint');
   if (highConfOnly && hiddenLowConf > 0) {
@@ -1746,7 +1809,12 @@ function copyUrl(url) {
 function showToast(msg) {
   const t = document.createElement('div');
   t.className = 'toast'; t.textContent = msg;
-  document.body.appendChild(t);
+  // Modal <dialog> elements live in the browser's top layer, above any
+  // z-index. A toast appended to <body> renders BENEATH an open modal.
+  // Anchor inside the topmost open dialog when one exists, so the toast
+  // joins the same stacking context.
+  const openDialog = document.querySelector('dialog[open]');
+  (openDialog || document.body).appendChild(t);
   setTimeout(() => t.remove(), 2100);
 }
 
