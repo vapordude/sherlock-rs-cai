@@ -265,6 +265,28 @@ impl VaultState {
     }
 }
 
+/// Snapshot the encrypted vault to a `Vec<u8>` suitable for downloading
+/// as a backup. Procedure: flush any pending WAL writes into the main
+/// db file via `PRAGMA wal_checkpoint(TRUNCATE)`, then read the file
+/// bytes. SQLCipher's at-rest format is what we expose; opening the
+/// backup elsewhere requires the same passphrase, so the bytes are
+/// safe to hand to a HTTP response (without the key they're just
+/// ciphertext).
+pub async fn export_encrypted_bytes(vault: &VaultState) -> Result<Vec<u8>> {
+    if vault.is_locked().await {
+        anyhow::bail!("vault locked");
+    }
+    vault
+        .with_conn(|c| {
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })
+        .await?;
+    let bytes = tokio::fs::read(&vault.db_path).await?;
+    let _ = audit_with_vault(vault, "vault_export", Some(&format!("{} bytes", bytes.len()))).await;
+    Ok(bytes)
+}
+
 /// Record the start of a scan and return its `scan_id`. Stored unencrypted-
 /// at-row-level but DB-encrypted at rest by SQLCipher. Caller emits
 /// `record_scan_finish` once all per-site results have streamed back.

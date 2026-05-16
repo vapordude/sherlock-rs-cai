@@ -76,6 +76,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/vault/init", post(vault_init_handler))
         .route("/api/vault/unlock", post(vault_unlock_handler))
         .route("/api/vault/lock", post(vault_lock_handler))
+        .route("/api/vault/export", get(vault_export_handler))
         .route("/api/profiles", get(profiles_list_handler))
         .route("/api/profiles/:id", get(profile_detail_handler))
         .route("/api/profiles/:id", axum::routing::delete(profile_delete_handler))
@@ -620,6 +621,43 @@ async fn vault_lock_handler(State(state): State<Arc<AppState>>) -> impl IntoResp
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
         ),
+    }
+}
+
+/// Streams the encrypted SQLCipher bytes as a downloadable backup. The
+/// archive is safe to share/store — without the passphrase the bytes are
+/// just ciphertext. Filename includes a UTC timestamp so users can
+/// distinguish multiple backups at a glance.
+#[cfg(feature = "vault")]
+async fn vault_export_handler(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if state.vault.is_locked().await {
+        return vault_locked_response().into_response();
+    }
+    match crate::vault::export_encrypted_bytes(&state.vault).await {
+        Ok(bytes) => {
+            let stamp = time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                .unwrap_or_else(|_| "now".to_string())
+                .replace([':', '.'], "-");
+            let disposition = format!(
+                "attachment; filename=\"sherlock-vault-{}.db\"",
+                stamp.chars().take(19).collect::<String>()
+            );
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (header::CONTENT_DISPOSITION, disposition),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 

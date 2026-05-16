@@ -308,6 +308,19 @@ body::before {
 .result-row:hover .copy-btn { opacity: 1; }
 .copy-btn:hover { background: var(--bg-card); color: var(--accent); border-color: var(--accent); }
 
+/* Mute-site button: thumbs-down per result; click adds site to localStorage's
+   muted_sites array, which filters all future scans. Same visual shape as
+   the copy-btn — opacity-0 until row hover. */
+.mute-btn {
+  width: 28px; height: 28px; background: none;
+  border: 1px solid transparent; border-radius: 6px;
+  color: var(--text-muted); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .85rem; transition: all .2s; opacity: 0;
+}
+.result-row:hover .mute-btn { opacity: 1; }
+.mute-btn:hover { background: var(--bg-card); color: var(--red); border-color: var(--red); }
+
 /* ── Empty / loading states ─────────────────────────────────── */
 .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
 .empty-state .icon { font-size: 3rem; margin-bottom: 16px; opacity: .3; }
@@ -589,6 +602,9 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   <button class="vault-pill" id="auditPill" onclick="openAuditDialog()" title="Audit log — every vault action (init, unlock, auto-accept, review)" style="display:none;">
     &#x1f4dc; Audit
   </button>
+  <button class="vault-pill" id="backupPill" onclick="downloadVaultBackup()" title="Download an encrypted backup of the vault. Needs the same passphrase to open elsewhere." style="display:none;">
+    &#x1f4e6; Backup
+  </button>
   <button class="vault-pill uninit" id="vaultPill" onclick="openVaultDialog()" title="Vault">
     &#x1f512; <span id="vaultPillLabel">Vault</span>
   </button>
@@ -739,6 +755,7 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
         </label>
       </div>
       <div class="btn-group">
+        <button class="btn-sm" onclick="openAllClaimed()" title="Open every Claimed result in a new tab">&#x1f5d6; Open all</button>
         <button class="btn-sm" onclick="exportCsv()">&#x1f4e5; CSV</button>
         <button class="btn-sm" onclick="exportTxt()">&#x1f4e5; TXT</button>
       </div>
@@ -946,19 +963,23 @@ function paintVault() {
   const banner = document.getElementById('vaultBanner');
   const profilesPill = document.getElementById('profilesPill');
   const auditPill    = document.getElementById('auditPill');
+  const backupPill   = document.getElementById('backupPill');
   pill.classList.remove('locked','unlocked','uninit');
   if (!vaultState.initialized) {
     pill.classList.add('uninit'); label.textContent = 'Set up vault';
     profilesPill.style.display = 'none';
     auditPill.style.display    = 'none';
+    backupPill.style.display   = 'none';
   } else if (vaultState.locked) {
     pill.classList.add('locked'); label.textContent = 'Unlock vault';
     profilesPill.style.display = 'none';
     auditPill.style.display    = 'none';
+    backupPill.style.display   = 'none';
   } else {
     pill.classList.add('unlocked'); label.textContent = 'Vault unlocked';
     profilesPill.style.display = 'flex';
     auditPill.style.display    = 'flex';
+    backupPill.style.display   = 'flex';
   }
   // Save-to-vault toggle banner: only show when save is enabled but vault is unusable.
   const save = document.getElementById('saveEvidence');
@@ -1202,6 +1223,29 @@ async function confirmDeleteProfile() {
 }
 
 // ── Audit log viewer ─────────────────────────────────────────────────────────
+async function downloadVaultBackup() {
+  if (vaultState.locked) { openVaultDialog(); return; }
+  if (!confirm('Download an encrypted backup of the vault?\n\nThe file is the raw SQLCipher database — without your passphrase it is just ciphertext, so it is safe to keep anywhere (email, cloud drive, USB stick). To restore on another device, replace ~/.local/share/sherlock-rs/vault.db with this file AND copy the matching vault.salt.')) return;
+  try {
+    const res = await vaultFetch('/api/vault/export');
+    if (!res.ok) { showToast('Backup failed: HTTP ' + res.status); return; }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    // Server already sets Content-Disposition with a stamped filename; we
+    // can let the browser honor that by not setting `download` explicitly.
+    a.href     = url;
+    a.rel      = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    showToast('Vault backup download started');
+  } catch (e) {
+    showToast('Backup failed: ' + e.message);
+  }
+}
+
 async function openAuditDialog() {
   if (vaultState.locked) { openVaultDialog(); return; }
   showDialog('auditDialog');
@@ -1646,8 +1690,14 @@ function renderResults() {
 
   let results = tabState[activeTab].results;
 
+  // Persistent muted-sites list filters BEFORE confidence — once the user
+  // has hidden a site, it shouldn't even count toward the "N hidden" hint.
+  const muted = loadMutedSites();
+
   let hiddenLowConf = 0;
+  let hiddenMuted   = 0;
   let filtered = results.filter(r => {
+    if (muted.has(r.site_name)) { hiddenMuted++; return false; }
     if (foundOnly && r.status !== 'claimed') return false;
     if (filter && !r.site_name.toLowerCase().includes(filter)) return false;
     if (highConfOnly && r.status === 'claimed' && (r.confidence ?? 0) < HIGH_CONF_FLOOR) {
@@ -1680,9 +1730,16 @@ function renderResults() {
 
   // Hidden-count hint so the user knows the filter is active.
   const hint = document.getElementById('resultsHiddenHint');
+  const parts = [];
   if (highConfOnly && hiddenLowConf > 0) {
+    parts.push(`<strong style="color:var(--amber)">${hiddenLowConf}</strong> low-confidence (Sherlock single-pattern)`);
+  }
+  if (hiddenMuted > 0) {
+    parts.push(`<strong style="color:var(--red)">${hiddenMuted}</strong> muted`);
+  }
+  if (parts.length) {
     hint.style.display = '';
-    hint.innerHTML = `Hiding <strong style="color:var(--amber)">${hiddenLowConf}</strong> low-confidence Claimed verdicts — these come from Sherlock's single-pattern rules and are unreliable. Uncheck "High-confidence only" above to view.`;
+    hint.innerHTML = `Hiding ${parts.join(' + ')}. ${hiddenLowConf > 0 ? 'Uncheck "High-confidence only" to view.' : ''}`;
   } else {
     hint.style.display = 'none';
   }
@@ -1715,6 +1772,11 @@ function resultRowHtml(r) {
     confHtml = ` <span class="confidence-pill ${cls}" title="Verdict confidence">${r.confidence}%</span>`;
   }
 
+  // Mute button: hides this site_name from this AND every future scan
+  // (persisted to localStorage). Useful for retiring noisy single-pattern
+  // Sherlock rules that the user knows produce false positives.
+  const muteHtml = `<button class="mute-btn" onclick="event.stopPropagation(); muteSite(${JSON.stringify(r.site_name)})" title="Hide this site from results (persistent)">&#x1f6ab;</button>`;
+
   // Extracted-fields drawer (only on claimed with non-empty extracted)
   let drawerHtml = '';
   let hasExtracted = false;
@@ -1732,9 +1794,42 @@ function resultRowHtml(r) {
     <div class="result-url">${urlHtml}</div>
     <span class="badge badge-${r.status}">${badgeLabel(r.status)}${confHtml}</span>
     <div class="result-time">${time}</div>
-    ${copyHtml}
+    <span style="display:flex; gap:2px;">${copyHtml}${muteHtml}</span>
     ${drawerHtml}
   </div>`;
+}
+
+// ── Muted-sites store + bulk-open helpers ────────────────────────────────────
+function loadMutedSites() {
+  try {
+    const raw = localStorage.getItem('muted_sites');
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
+}
+function saveMutedSites(set) {
+  try { localStorage.setItem('muted_sites', JSON.stringify([...set])); } catch {}
+}
+function muteSite(name) {
+  const muted = loadMutedSites();
+  muted.add(name);
+  saveMutedSites(muted);
+  showToast(`Muted "${name}" — uncheck "High-confidence only" or clear localStorage to undo`);
+  renderResults();
+}
+function isMutedSite(name) { return loadMutedSites().has(name); }
+
+function openAllClaimed() {
+  if (!activeTab || !tabState[activeTab]) return;
+  const claimed = tabState[activeTab].results.filter(r =>
+    r.status === 'claimed' && !isMutedSite(r.site_name)
+  );
+  if (claimed.length === 0) { showToast('No Claimed results to open'); return; }
+  if (claimed.length > 20 && !confirm(`Open ${claimed.length} tabs?`)) return;
+  // Pop-up blockers fire on bulk window.open. The user-gesture allowance
+  // gets us a few — we space them slightly so the browser doesn't choke.
+  claimed.forEach((r, i) => {
+    setTimeout(() => window.open(r.site_url, '_blank', 'noopener'), i * 60);
+  });
 }
 
 // ── Extracted-fields drawer ──────────────────────────────────────────────────
