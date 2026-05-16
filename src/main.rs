@@ -2,6 +2,7 @@ mod checker;
 mod export;
 mod extract;
 mod result;
+mod custom_sites;
 mod server;
 mod sites;
 #[cfg(feature = "vault")]
