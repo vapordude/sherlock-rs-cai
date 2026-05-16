@@ -635,6 +635,13 @@ async fn fetch_and_store_avatar(
     profile_id: &str,
     url: &str,
 ) -> anyhow::Result<()> {
+    // Extractor matched but pulled an empty string — don't fire an HTTP
+    // request just to fail. Also rejects clearly-broken values like a
+    // bare path with no scheme.
+    let url = url.trim();
+    if url.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
+        anyhow::bail!("avatar URL malformed or empty: {url:?}");
+    }
     const MAX_BYTES: usize = 2 * 1024 * 1024;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))

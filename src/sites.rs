@@ -534,14 +534,17 @@ fn merge_site(a: SiteData, b: SiteData) -> SiteData {
 }
 
 /// Parse the upstream Sherlock `data.json` (top-level `{ site_name: { ... } }`
-/// shape). Strips the `$schema` key, drops entries that fail to deserialize.
-/// Compiles each `regex_check` and any extractors once.
+/// shape). Strips the `$schema` key, drops entries that fail to deserialize,
+/// and quietly drops entries whose `url` is missing the `{}` placeholder —
+/// without it, `format_url` would return the same URL for every username,
+/// producing nonsense matches.
 fn parse_sherlock(json: &str) -> Result<HashMap<String, SiteData>> {
     let raw: HashMap<String, serde_json::Value> = serde_json::from_str(json)?;
     let mut sites: HashMap<String, SiteData> = raw
         .into_iter()
         .filter(|(k, _)| k != "$schema")
-        .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|s| (k, s)))
+        .filter_map(|(k, v)| serde_json::from_value::<SiteData>(v).ok().map(|s| (k, s)))
+        .filter(|(_, s)| s.url.contains("{}"))
         .collect();
 
     for site in sites.values_mut() {
@@ -603,6 +606,11 @@ fn parse_wmn(json: &str) -> Result<HashMap<String, SiteData>> {
     let mut out = HashMap::new();
     for w in parsed.sites {
         let url = w.uri_check.replace("{account}", "{}");
+        // Without a `{}` slot the format_url helper would return the same
+        // URL for every username — drop the entry rather than emit noise.
+        if !url.contains("{}") {
+            continue;
+        }
         let url_main = normalize_domain(&url)
             .map(|d| format!("https://{d}"))
             .unwrap_or_else(|| url.clone());
@@ -676,6 +684,11 @@ fn parse_maigret(json: &str) -> Result<HashMap<String, SiteData>> {
             Ok(e) => e,
             Err(_) => continue,
         };
+        // Same placeholder-validation rule as the other parsers — drop
+        // anything that wouldn't produce a per-username URL.
+        if !entry.url.contains("{}") {
+            continue;
+        }
         let extractors: Vec<Extractor> = entry
             .extractors
             .into_iter()
