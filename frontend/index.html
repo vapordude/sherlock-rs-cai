@@ -701,7 +701,10 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
           <option value="time">Sort by time</option>
         </select>
         <label class="show-found-only">
-          <input type="checkbox" id="foundOnly" onchange="renderResults()"> Found only
+          <input type="checkbox" id="foundOnly" checked onchange="renderResults()"> Found only
+        </label>
+        <label class="show-found-only" title="Hide single-pattern Sherlock matches that lack a dual-pattern verification rule. Many of those are false positives — toggle off to see them all.">
+          <input type="checkbox" id="highConfOnly" checked onchange="renderResults()"> High-confidence only
         </label>
       </div>
       <div class="btn-group">
@@ -709,6 +712,7 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
         <button class="btn-sm" onclick="exportTxt()">&#x1f4e5; TXT</button>
       </div>
     </div>
+    <div id="resultsHiddenHint" style="display:none; padding:6px 14px; font-size:.75rem; color:var(--text-muted); border-bottom:1px solid var(--bg-card);"></div>
     <div class="results-grid" id="resultsGrid"></div>
   </div>
 
@@ -1464,18 +1468,30 @@ function scheduleRender() {
 
 const statusOrder = { claimed:0, tentative:1, waf:2, unknown:3, illegal:4, available:5 };
 
+// Confidence floor below which we hide claimed verdicts by default.
+// Dual-pattern (WMN-style) verdicts score 95; legacy single-pattern
+// Sherlock-style verdicts score 70. The 80 threshold isolates the noisy
+// single-pattern firehose from the trustworthy dual-pattern hits.
+const HIGH_CONF_FLOOR = 80;
+
 function renderResults() {
   if (!activeTab || !tabState[activeTab]) return;
 
-  const filter   = document.getElementById('filterInput').value.toLowerCase();
-  const sortBy   = document.getElementById('sortSelect').value;
-  const foundOnly= document.getElementById('foundOnly').checked;
+  const filter       = document.getElementById('filterInput').value.toLowerCase();
+  const sortBy       = document.getElementById('sortSelect').value;
+  const foundOnly    = document.getElementById('foundOnly').checked;
+  const highConfOnly = document.getElementById('highConfOnly').checked;
 
   let results = tabState[activeTab].results;
 
+  let hiddenLowConf = 0;
   let filtered = results.filter(r => {
     if (foundOnly && r.status !== 'claimed') return false;
     if (filter && !r.site_name.toLowerCase().includes(filter)) return false;
+    if (highConfOnly && r.status === 'claimed' && (r.confidence ?? 0) < HIGH_CONF_FLOOR) {
+      hiddenLowConf++;
+      return false;
+    }
     return true;
   });
 
@@ -1486,6 +1502,14 @@ function renderResults() {
   });
 
   document.getElementById('resultsGrid').innerHTML = filtered.map(resultRowHtml).join('');
+  // Hidden-count hint so the user knows the filter is active.
+  const hint = document.getElementById('resultsHiddenHint');
+  if (highConfOnly && hiddenLowConf > 0) {
+    hint.style.display = '';
+    hint.innerHTML = `Hiding <strong style="color:var(--amber)">${hiddenLowConf}</strong> low-confidence Claimed verdicts — these come from Sherlock's single-pattern rules and are unreliable. Uncheck "High-confidence only" above to view.`;
+  } else {
+    hint.style.display = 'none';
+  }
 }
 
 function badgeLabel(status) {
