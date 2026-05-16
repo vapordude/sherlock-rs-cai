@@ -1,5 +1,5 @@
 use crate::result::{QueryResult, QueryStatus};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn sanitize_csv_field(s: &str) -> String {
     if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
@@ -32,8 +32,9 @@ pub fn to_txt(results: &[QueryResult]) -> String {
 
     // Preserve insertion order
     let mut usernames: Vec<&str> = Vec::new();
+    let mut seen = HashSet::new();
     for r in results {
-        if !usernames.contains(&r.username.as_str()) {
+        if seen.insert(r.username.as_str()) {
             usernames.push(&r.username);
         }
     }
