@@ -602,6 +602,9 @@ dialog.app-dialog::backdrop { background: rgba(0,0,0,.6); }
   <button class="vault-pill" id="auditPill" onclick="openAuditDialog()" title="Audit log — every vault action (init, unlock, auto-accept, review)" style="display:none;">
     &#x1f4dc; Audit
   </button>
+  <button class="vault-pill" id="backupPill" onclick="downloadVaultBackup()" title="Download an encrypted backup of the vault. Needs the same passphrase to open elsewhere." style="display:none;">
+    &#x1f4e6; Backup
+  </button>
   <button class="vault-pill uninit" id="vaultPill" onclick="openVaultDialog()" title="Vault">
     &#x1f512; <span id="vaultPillLabel">Vault</span>
   </button>
@@ -960,19 +963,23 @@ function paintVault() {
   const banner = document.getElementById('vaultBanner');
   const profilesPill = document.getElementById('profilesPill');
   const auditPill    = document.getElementById('auditPill');
+  const backupPill   = document.getElementById('backupPill');
   pill.classList.remove('locked','unlocked','uninit');
   if (!vaultState.initialized) {
     pill.classList.add('uninit'); label.textContent = 'Set up vault';
     profilesPill.style.display = 'none';
     auditPill.style.display    = 'none';
+    backupPill.style.display   = 'none';
   } else if (vaultState.locked) {
     pill.classList.add('locked'); label.textContent = 'Unlock vault';
     profilesPill.style.display = 'none';
     auditPill.style.display    = 'none';
+    backupPill.style.display   = 'none';
   } else {
     pill.classList.add('unlocked'); label.textContent = 'Vault unlocked';
     profilesPill.style.display = 'flex';
     auditPill.style.display    = 'flex';
+    backupPill.style.display   = 'flex';
   }
   // Save-to-vault toggle banner: only show when save is enabled but vault is unusable.
   const save = document.getElementById('saveEvidence');
@@ -1216,6 +1223,29 @@ async function confirmDeleteProfile() {
 }
 
 // ── Audit log viewer ─────────────────────────────────────────────────────────
+async function downloadVaultBackup() {
+  if (vaultState.locked) { openVaultDialog(); return; }
+  if (!confirm('Download an encrypted backup of the vault?\n\nThe file is the raw SQLCipher database — without your passphrase it is just ciphertext, so it is safe to keep anywhere (email, cloud drive, USB stick). To restore on another device, replace ~/.local/share/sherlock-rs/vault.db with this file AND copy the matching vault.salt.')) return;
+  try {
+    const res = await vaultFetch('/api/vault/export');
+    if (!res.ok) { showToast('Backup failed: HTTP ' + res.status); return; }
+    const blob = await res.blob();
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    // Server already sets Content-Disposition with a stamped filename; we
+    // can let the browser honor that by not setting `download` explicitly.
+    a.href     = url;
+    a.rel      = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    showToast('Vault backup download started');
+  } catch (e) {
+    showToast('Backup failed: ' + e.message);
+  }
+}
+
 async function openAuditDialog() {
   if (vaultState.locked) { openVaultDialog(); return; }
   showDialog('auditDialog');
