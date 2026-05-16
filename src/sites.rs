@@ -132,6 +132,13 @@ pub struct SiteData {
     /// sources contributed and `merge_site` combined them.
     #[serde(default)]
     pub source: SiteSource,
+    /// WhatsMyName-style list of real test usernames known to exist on
+    /// this site. Used by a future self-validation runner to flag rules
+    /// whose pattern has gone stale (the upstream signature is the WMN
+    /// CI's "known accounts" workflow). Empty for Sherlock/Maigret
+    /// entries that don't carry this metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub known: Vec<String>,
     /// Per-extractor compiled selector + regex, rebuilt at load time.
     /// Skipped during (de)serialization for the same reason as
     /// `compiled_regex`. Consumed by `checker.rs::check_site` →
@@ -373,13 +380,18 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
     if let Ok(merged_json) = serde_json::to_string(&sites) {
         let _ = tokio::fs::write(dir.join("data.merged.json"), &merged_json).await;
     }
+    // How many rules carry at least one WMN-style "known" test account.
+    // Hint for the UI so it can advertise self-validation coverage once
+    // the runner lands.
+    let with_known: usize = sites.values().filter(|s| !s.known.is_empty()).count();
     let meta = serde_json::json!({
-        "fetched_at":     time::OffsetDateTime::now_utc().to_string(),
-        "sherlock_count": sherlock_count,
-        "wmn_count":      wmn_count,
-        "maigret_count":  maigret_count,
-        "total":          sites.len(),
-        "errors":         errors,
+        "fetched_at":      time::OffsetDateTime::now_utc().to_string(),
+        "sherlock_count":  sherlock_count,
+        "wmn_count":       wmn_count,
+        "maigret_count":   maigret_count,
+        "total":           sites.len(),
+        "with_known":      with_known,
+        "errors":          errors,
     });
     let _ = tokio::fs::write(
         dir.join("data.merged.meta.json"),
@@ -529,6 +541,18 @@ fn merge_site(a: SiteData, b: SiteData) -> SiteData {
         extractors,
         categories,
         source: SiteSource::Merged,
+        // Known-account list: union the two sources (one might be a
+        // pure Sherlock entry with nothing, the other the WMN entry
+        // that supplied the dual-pattern rule AND the test accounts).
+        known: {
+            let mut out = a.known.clone();
+            for k in &b.known {
+                if !out.contains(k) {
+                    out.push(k.clone());
+                }
+            }
+            out
+        },
         compiled_extractors: Vec::new(),
     }
 }
@@ -594,6 +618,11 @@ struct WmnSite {
     cat: Option<String>,
     #[serde(default)]
     post_body: Option<String>,
+    /// Known test usernames upstream uses to self-validate the rule in CI.
+    /// Carries through to the unified SiteData for future use by our own
+    /// in-tool validator.
+    #[serde(default)]
+    known: Vec<String>,
 }
 
 /// Parse the WhatsMyName `wmn-data.json` shape (`{"sites": [ { name,
@@ -644,6 +673,7 @@ fn parse_wmn(json: &str) -> Result<HashMap<String, SiteData>> {
             extractors: Vec::new(),
             categories,
             source: SiteSource::Whatsmyname,
+            known: w.known,
             compiled_extractors: Vec::new(),
         };
         out.insert(w.name, site);
@@ -719,6 +749,7 @@ fn parse_maigret(json: &str) -> Result<HashMap<String, SiteData>> {
             extractors,
             categories: entry.categories,
             source: SiteSource::Maigret,
+            known: Vec::new(),
             compiled_extractors: Vec::new(),
         };
         out.insert(name, site);
@@ -768,6 +799,7 @@ mod tests {
             extractors: vec![],
             categories: vec!["legacy".into()],
             source: SiteSource::Sherlock,
+            known: vec![],
             compiled_extractors: vec![],
         };
         sherlock.error_msg = Some(ErrorMsg::Single("not found".into()));
@@ -797,6 +829,7 @@ mod tests {
             extractors: vec![],
             categories: vec!["social".into()],
             source: SiteSource::Whatsmyname,
+            known: vec![],
             compiled_extractors: vec![],
         };
 
