@@ -372,9 +372,13 @@ pub async fn download_sites() -> Result<HashMap<String, SiteData>> {
     // ready-to-use sites.
     for site in sites.values_mut() {
         if let Some(pattern) = &site.regex_check {
-            site.compiled_regex = Regex::new(pattern).ok();
+            if site.compiled_regex.is_none() {
+                site.compiled_regex = Regex::new(pattern).ok();
+            }
         }
-        compile_site_extractors(site);
+        if site.compiled_extractors.is_empty() {
+            compile_site_extractors(site);
+        }
     }
 
     if let Ok(merged_json) = serde_json::to_string(&sites) {
