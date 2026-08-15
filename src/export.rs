@@ -2,7 +2,7 @@ use crate::result::{QueryResult, QueryStatus};
 use std::collections::{HashMap, HashSet};
 
 fn sanitize_csv_field(s: &str) -> String {
-    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    if s.trim_start().starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{}", s)
     } else {
         s.to_string()
@@ -18,7 +18,9 @@ pub fn to_csv(results: &[QueryResult]) -> String {
             sanitize_csv_field(&r.site_name),
             sanitize_csv_field(&r.site_url),
             r.status.as_str().to_string(),
-            r.response_time_ms.map(|t| t.to_string()).unwrap_or_default(),
+            r.response_time_ms
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
         ]);
     }
     String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
@@ -61,4 +63,32 @@ pub fn to_txt(results: &[QueryResult]) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_csv_field() {
+        // Normal fields should remain unchanged
+        assert_eq!(sanitize_csv_field("normal"), "normal");
+        assert_eq!(sanitize_csv_field("  normal"), "  normal");
+
+        // Formula fields should be prepended with a quote
+        assert_eq!(sanitize_csv_field("=cmd"), "'=cmd");
+        assert_eq!(sanitize_csv_field("+cmd"), "'+cmd");
+        assert_eq!(sanitize_csv_field("-cmd"), "'-cmd");
+        assert_eq!(sanitize_csv_field("@cmd"), "'@cmd");
+        assert_eq!(sanitize_csv_field("\tcmd"), "\tcmd");
+        assert_eq!(sanitize_csv_field("\rcmd"), "\rcmd");
+
+        // Formula fields with leading whitespace should be prepended with a quote
+        assert_eq!(sanitize_csv_field(" =cmd"), "' =cmd");
+        assert_eq!(sanitize_csv_field("   +cmd"), "'   +cmd");
+        assert_eq!(sanitize_csv_field("\n -cmd"), "'\n -cmd");
+        assert_eq!(sanitize_csv_field("\t @cmd"), "'\t @cmd");
+        assert_eq!(sanitize_csv_field("\r \tcmd"), "\r \tcmd");
+        assert_eq!(sanitize_csv_field(" \r\n\t =cmd"), "' \r\n\t =cmd");
+    }
 }
