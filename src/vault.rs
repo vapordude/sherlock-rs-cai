@@ -1845,6 +1845,12 @@ mod tests {
         assert_eq!(hamming_distance(&[0xff, 0xff], &[0x00, 0x00]), 16);
     }
 
+    #[test]
+    fn compute_composite_fingerprint_returns_none_on_invalid_image() {
+        assert!(compute_composite_fingerprint(b"not an image").is_none());
+        assert!(compute_composite_fingerprint(b"").is_none());
+    }
+
     #[tokio::test]
     async fn composite_fingerprint_higher_resolution_than_phash() {
         let dir = tempfile::tempdir().unwrap();
@@ -1911,8 +1917,6 @@ mod tests {
             hits[0]["bit_width"]
         );
 
-        // Non-image bytes ⇒ composite returns None, gracefully.
-        assert!(compute_composite_fingerprint(b"not an image").is_none());
     }
 
     #[tokio::test]
