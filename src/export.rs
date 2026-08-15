@@ -18,7 +18,9 @@ pub fn to_csv(results: &[QueryResult]) -> String {
             sanitize_csv_field(&r.site_name),
             sanitize_csv_field(&r.site_url),
             r.status.as_str().to_string(),
-            r.response_time_ms.map(|t| t.to_string()).unwrap_or_default(),
+            r.response_time_ms
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
         ]);
     }
     String::from_utf8(wtr.into_inner().unwrap_or_default()).unwrap_or_default()
@@ -61,4 +63,52 @@ pub fn to_txt(results: &[QueryResult]) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_csv_empty() {
+        let results = vec![];
+        let csv = to_csv(&results);
+        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\n");
+    }
+
+    #[test]
+    fn test_to_csv_normal() {
+        let results = vec![QueryResult {
+            username: "johndoe".to_string(),
+            site_name: "GitHub".to_string(),
+            url_main: "https://github.com/".to_string(),
+            site_url: "https://github.com/johndoe".to_string(),
+            status: QueryStatus::Claimed,
+            response_time_ms: Some(150),
+            context: None,
+            confidence: 100,
+            extracted: None,
+            body_sha256: None,
+        }];
+        let csv = to_csv(&results);
+        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\njohndoe,GitHub,https://github.com/johndoe,claimed,150\n");
+    }
+
+    #[test]
+    fn test_to_csv_sanitized() {
+        let results = vec![QueryResult {
+            username: "=cmd|' /C calc'!A0".to_string(),
+            site_name: "+BadSite".to_string(),
+            site_url: "@https://bad.com".to_string(),
+            url_main: "https://bad.com".to_string(),
+            status: QueryStatus::Available,
+            response_time_ms: None,
+            context: None,
+            confidence: 100,
+            extracted: None,
+            body_sha256: None,
+        }];
+        let csv = to_csv(&results);
+        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\n\'=cmd|\' /C calc\'!A0,\'+BadSite,\'@https://bad.com,available,\n");
+    }
 }
