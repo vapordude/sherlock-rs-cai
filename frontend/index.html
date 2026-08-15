@@ -1005,7 +1005,7 @@ async function openProfilesDialog() {
       return;
     }
     listRoot.innerHTML = list.map(p => `
-      <div class="profile-list-item" data-id="${escHtml(p.id)}" onclick="selectProfile(${JSON.stringify(p.id)})">
+      <div class="profile-list-item" data-id="${escHtml(p.id)}" onclick="selectProfile(${escHtml(JSON.stringify(p.id))})">
         <div style="display:flex; justify-content:space-between; align-items:center;">
           <strong style="color:var(--text);">${escHtml(p.label || '(untitled)')}</strong>
           <span class="pending-score">${p.evidence_count}</span>
@@ -1177,7 +1177,7 @@ async function refreshSimilar() {
         </div>
         <div>
           <span class="similar-distance ${cls}">${label}</span>
-          <button class="btn-sm" style="margin-left:4px;" onclick="openSimilarProfile(${JSON.stringify(m.profile_id)})">Open</button>
+          <button class="btn-sm" style="margin-left:4px;" onclick="openSimilarProfile(${escHtml(JSON.stringify(m.profile_id))})">Open</button>
         </div>
       </div>`;
     }).join('');
@@ -1626,7 +1626,7 @@ function initTabs(usernames) {
   }
   bar.style.display = 'flex';
   bar.innerHTML = usernames.map(u => `
-    <button class="tab-btn" id="${tabId(u)}" onclick="switchTab(${JSON.stringify(u)})">
+    <button class="tab-btn" id="${tabId(u)}" onclick="switchTab(${escHtml(JSON.stringify(u))})">
       <span>${escHtml(u)}</span>
       <span class="tab-badge" id="${tabId(u)}_badge">0</span>
     </button>
@@ -1762,7 +1762,7 @@ function resultRowHtml(r) {
     ? `<a href="${escHtml(r.site_url)}" target="_blank" rel="noopener">${escHtml(r.site_url)}</a>`
     : escHtml(r.site_url);
   const copyHtml = r.status === 'claimed'
-    ? `<button class="copy-btn" onclick="copyUrl(${JSON.stringify(r.site_url)})" title="Copy URL">&#x1f4cb;</button>`
+    ? `<button class="copy-btn" onclick="copyUrl(${escHtml(JSON.stringify(r.site_url))})" title="Copy URL">&#x1f4cb;</button>`
     : '<span></span>';
 
   // Confidence pill — only meaningful when > 0
@@ -1775,7 +1775,7 @@ function resultRowHtml(r) {
   // Mute button: hides this site_name from this AND every future scan
   // (persisted to localStorage). Useful for retiring noisy single-pattern
   // Sherlock rules that the user knows produce false positives.
-  const muteHtml = `<button class="mute-btn" onclick="event.stopPropagation(); muteSite(${JSON.stringify(r.site_name)})" title="Hide this site from results (persistent)">&#x1f6ab;</button>`;
+  const muteHtml = `<button class="mute-btn" onclick="event.stopPropagation(); muteSite(${escHtml(JSON.stringify(r.site_name))})" title="Hide this site from results (persistent)">&#x1f6ab;</button>`;
 
   // Extracted-fields drawer (only on claimed with non-empty extracted)
   let drawerHtml = '';
@@ -1877,7 +1877,7 @@ function renderFieldValue(field, val) {
   if (!isUrl) return escHtml(v);
   const a = `<a href="${escHtml(v)}" target="_blank" rel="noopener">${escHtml(v)}</a>`;
   if (looksMediaUrl(v)) {
-    return a + ` <button class="ytdlp-btn" type="button" onclick="copyYtdlp(${JSON.stringify(v)})" title="Copy yt-dlp command">&#x2398; yt-dlp</button>`;
+    return a + ` <button class="ytdlp-btn" type="button" onclick="copyYtdlp(${escHtml(JSON.stringify(v))})" title="Copy yt-dlp command">&#x2398; yt-dlp</button>`;
   }
   return a;
 }
