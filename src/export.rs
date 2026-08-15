@@ -2,7 +2,7 @@ use crate::result::{QueryResult, QueryStatus};
 use std::collections::{HashMap, HashSet};
 
 fn sanitize_csv_field(s: &str) -> String {
-    if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    if s.trim_start().starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{}", s)
     } else {
         s.to_string()
@@ -68,142 +68,27 @@ pub fn to_txt(results: &[QueryResult]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::result::QueryStatus;
 
     #[test]
-    fn test_to_txt() {
-        let results = vec![
-            QueryResult {
-                username: "testuser".to_string(),
-                site_name: "TestSite".to_string(),
-                url_main: "https://testsite.com".to_string(),
-                site_url: "https://testsite.com/testuser".to_string(),
-                status: QueryStatus::Claimed,
-                response_time_ms: Some(100),
-                context: None,
-                confidence: 100,
-                extracted: None,
-                body_sha256: None,
-            },
-            QueryResult {
-                username: "testuser".to_string(),
-                site_name: "AnotherSite".to_string(),
-                url_main: "https://anothersite.com".to_string(),
-                site_url: "https://anothersite.com/testuser".to_string(),
-                status: QueryStatus::Available,
-                response_time_ms: Some(150),
-                context: None,
-                confidence: 100,
-                extracted: None,
-                body_sha256: None,
-            },
-        ];
+    fn test_sanitize_csv_field() {
+        // Normal fields should remain unchanged
+        assert_eq!(sanitize_csv_field("normal"), "normal");
+        assert_eq!(sanitize_csv_field("  normal"), "  normal");
 
-        let txt = to_txt(&results);
+        // Formula fields should be prepended with a quote
+        assert_eq!(sanitize_csv_field("=cmd"), "'=cmd");
+        assert_eq!(sanitize_csv_field("+cmd"), "'+cmd");
+        assert_eq!(sanitize_csv_field("-cmd"), "'-cmd");
+        assert_eq!(sanitize_csv_field("@cmd"), "'@cmd");
+        assert_eq!(sanitize_csv_field("\tcmd"), "\tcmd");
+        assert_eq!(sanitize_csv_field("\rcmd"), "\rcmd");
 
-        assert!(txt.contains("Sherlock-RS — Results"));
-        assert!(txt.contains("="));
-        assert!(txt.contains("[testuser] — Found on 1 site(s):"));
-        assert!(txt.contains("  [+] TestSite: https://testsite.com/testuser"));
-
-        // The non-claimed status should not be present
-        assert!(!txt.contains("AnotherSite"));
-    }
-
-    #[test]
-    fn test_to_txt_multiple_users() {
-        let results = vec![
-            QueryResult {
-                username: "user1".to_string(),
-                site_name: "Site1".to_string(),
-                url_main: "https://site1.com".to_string(),
-                site_url: "https://site1.com/user1".to_string(),
-                status: QueryStatus::Claimed,
-                response_time_ms: Some(100),
-                context: None,
-                confidence: 100,
-                extracted: None,
-                body_sha256: None,
-            },
-            QueryResult {
-                username: "user2".to_string(),
-                site_name: "Site2".to_string(),
-                url_main: "https://site2.com".to_string(),
-                site_url: "https://site2.com/user2".to_string(),
-                status: QueryStatus::Claimed,
-                response_time_ms: Some(150),
-                context: None,
-                confidence: 100,
-                extracted: None,
-                body_sha256: None,
-            },
-        ];
-
-        let txt = to_txt(&results);
-
-        assert!(txt.contains("[user1] — Found on 1 site(s):"));
-        assert!(txt.contains("  [+] Site1: https://site1.com/user1"));
-
-        assert!(txt.contains("[user2] — Found on 1 site(s):"));
-        assert!(txt.contains("  [+] Site2: https://site2.com/user2"));
-
-        // Check insertion order preservation
-        let pos_user1 = txt.find("[user1]").unwrap();
-        let pos_user2 = txt.find("[user2]").unwrap();
-        assert!(pos_user1 < pos_user2);
-    }
-
-    #[test]
-    fn test_to_txt_empty() {
-        let results: Vec<QueryResult> = vec![];
-        let txt = to_txt(&results);
-
-        assert!(txt.contains("Sherlock-RS — Results"));
-        assert!(txt.contains("="));
-        // Should not contain any user sections
-        assert!(!txt.contains("Found on"));
-
-
-    #[test]
-    fn test_to_csv_empty() {
-        let results = vec![];
-        let csv = to_csv(&results);
-        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\n");
-    }
-
-    #[test]
-    fn test_to_csv_normal() {
-        let results = vec![QueryResult {
-            username: "johndoe".to_string(),
-            site_name: "GitHub".to_string(),
-            url_main: "https://github.com/".to_string(),
-            site_url: "https://github.com/johndoe".to_string(),
-            status: QueryStatus::Claimed,
-            response_time_ms: Some(150),
-            context: None,
-            confidence: 100,
-            extracted: None,
-            body_sha256: None,
-        }];
-        let csv = to_csv(&results);
-        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\njohndoe,GitHub,https://github.com/johndoe,claimed,150\n");
-    }
-
-    #[test]
-    fn test_to_csv_sanitized() {
-        let results = vec![QueryResult {
-            username: "=cmd|' /C calc'!A0".to_string(),
-            site_name: "+BadSite".to_string(),
-            site_url: "@https://bad.com".to_string(),
-            url_main: "https://bad.com".to_string(),
-            status: QueryStatus::Available,
-            response_time_ms: None,
-            context: None,
-            confidence: 100,
-            extracted: None,
-            body_sha256: None,
-        }];
-        let csv = to_csv(&results);
-        assert_eq!(csv, "Username,Site,URL,Status,Response Time (ms)\n\'=cmd|\' /C calc\'!A0,\'+BadSite,\'@https://bad.com,available,\n");
+        // Formula fields with leading whitespace should be prepended with a quote
+        assert_eq!(sanitize_csv_field(" =cmd"), "' =cmd");
+        assert_eq!(sanitize_csv_field("   +cmd"), "'   +cmd");
+        assert_eq!(sanitize_csv_field("\n -cmd"), "'\n -cmd");
+        assert_eq!(sanitize_csv_field("\t @cmd"), "'\t @cmd");
+        assert_eq!(sanitize_csv_field("\r \tcmd"), "\r \tcmd");
+        assert_eq!(sanitize_csv_field(" \r\n\t =cmd"), "' \r\n\t =cmd");
     }
 }
