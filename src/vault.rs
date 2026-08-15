@@ -283,7 +283,12 @@ pub async fn export_encrypted_bytes(vault: &VaultState) -> Result<Vec<u8>> {
         })
         .await?;
     let bytes = tokio::fs::read(&vault.db_path).await?;
-    let _ = audit_with_vault(vault, "vault_export", Some(&format!("{} bytes", bytes.len()))).await;
+    let _ = audit_with_vault(
+        vault,
+        "vault_export",
+        Some(&format!("{} bytes", bytes.len())),
+    )
+    .await;
     Ok(bytes)
 }
 
@@ -440,14 +445,19 @@ pub async fn propose_or_apply(
     if evidence_rows.is_empty() {
         return Ok(ProposalOutcome::NoEvidence);
     }
-    let proposal =
-        decide_proposal(vault, scan_id, username, site_name, site_url, &evidence_rows).await?;
+    let proposal = decide_proposal(
+        vault,
+        scan_id,
+        username,
+        site_name,
+        site_url,
+        &evidence_rows,
+    )
+    .await?;
 
     // Clamp the threshold to a sane range so a stale UI can't accidentally
     // request "auto-accept everything" (threshold = 0).
-    let effective_threshold = threshold
-        .unwrap_or(AUTO_ACCEPT_THRESHOLD)
-        .clamp(0.50, 0.95);
+    let effective_threshold = threshold.unwrap_or(AUTO_ACCEPT_THRESHOLD).clamp(0.50, 0.95);
 
     if auto_accept && proposal.score >= effective_threshold {
         let profile_id = apply_proposal(vault, &proposal).await?;
@@ -728,7 +738,9 @@ pub async fn get_profile(vault: &VaultState, id: &str) -> Result<serde_json::Val
         .with_conn(move |c| {
             let id_clone = id.clone();
             let profile: Option<serde_json::Value> = c
-                .prepare("SELECT id, label, created_at, updated_at, note FROM profiles WHERE id = ?1")?
+                .prepare(
+                    "SELECT id, label, created_at, updated_at, note FROM profiles WHERE id = ?1",
+                )?
                 .query_row(rusqlite::params![id_clone], |r| {
                     Ok(serde_json::json!({
                         "id":         r.get::<_, String>(0)?,
@@ -844,9 +856,7 @@ pub async fn accept_pending(vault: &VaultState, id: i64, note: Option<String>) -
                 Some(_) => Err(tokio_rusqlite::Error::Other(
                     "already resolved".to_string().into(),
                 )),
-                None => Err(tokio_rusqlite::Error::Other(
-                    "not found".to_string().into(),
-                )),
+                None => Err(tokio_rusqlite::Error::Other("not found".to_string().into())),
             }
         })
         .await?;
@@ -1158,7 +1168,10 @@ pub async fn find_similar_by_composite(
                     }
                     if let Some(map) = row.as_object_mut() {
                         map.insert("hamming_distance".into(), serde_json::Value::from(d));
-                        map.insert("bit_width".into(), serde_json::Value::from(seed_bytes.len() * 8));
+                        map.insert(
+                            "bit_width".into(),
+                            serde_json::Value::from(seed_bytes.len() * 8),
+                        );
                     }
                     Some((d, row))
                 })
@@ -1229,8 +1242,9 @@ pub async fn delete_profile(vault: &VaultState, profile_id: &str) -> Result<bool
 pub async fn list_audit(vault: &VaultState, limit: i64) -> Result<Vec<serde_json::Value>> {
     vault
         .with_conn(move |c| {
-            let mut stmt =
-                c.prepare("SELECT id, at, action, detail FROM audit_log ORDER BY id DESC LIMIT ?1")?;
+            let mut stmt = c.prepare(
+                "SELECT id, at, action, detail FROM audit_log ORDER BY id DESC LIMIT ?1",
+            )?;
             let rows = stmt
                 .query_map(rusqlite::params![limit], |r| {
                     Ok(serde_json::json!({
@@ -1254,11 +1268,7 @@ async fn audit_with_vault(vault: &VaultState, action: &str, detail: Option<&str>
         .with_conn(move |c| {
             c.execute(
                 "INSERT INTO audit_log (at, action, detail) VALUES (?1, ?2, ?3)",
-                rusqlite::params![
-                    time::OffsetDateTime::now_utc().to_string(),
-                    action,
-                    detail
-                ],
+                rusqlite::params![time::OffsetDateTime::now_utc().to_string(), action, detail],
             )?;
             Ok(())
         })
@@ -1268,9 +1278,17 @@ async fn audit_with_vault(vault: &VaultState, action: &str, detail: Option<&str>
 /// Argon2id KDF — `(passphrase, salt) -> 32-byte key`. Key bytes are
 /// wrapped in `Zeroizing` so they're wiped on drop even if the caller
 /// forgets to.
-pub fn derive_key(passphrase: &str, salt: &[u8; SALT_LEN]) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>> {
-    let params = Params::new(ARGON2_MEM_KIB, ARGON2_TIME_COST, ARGON2_PARALLELISM, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
+pub fn derive_key(
+    passphrase: &str,
+    salt: &[u8; SALT_LEN],
+) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>> {
+    let params = Params::new(
+        ARGON2_MEM_KIB,
+        ARGON2_TIME_COST,
+        ARGON2_PARALLELISM,
+        Some(ARGON2_OUTPUT_LEN),
+    )
+    .map_err(|e| anyhow::anyhow!("argon2 params: {e}"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; ARGON2_OUTPUT_LEN]);
     argon
@@ -1343,11 +1361,7 @@ async fn audit(conn: &AsyncConnection, action: &str, detail: Option<&str>) -> Re
     conn.call(move |c| {
         c.execute(
             "INSERT INTO audit_log (at, action, detail) VALUES (?1, ?2, ?3)",
-            rusqlite::params![
-                time::OffsetDateTime::now_utc().to_string(),
-                action,
-                detail
-            ],
+            rusqlite::params![time::OffsetDateTime::now_utc().to_string(), action, detail],
         )?;
         Ok(())
     })
@@ -1523,6 +1537,12 @@ mod tests {
         assert_ne!(*k1, *k2);
     }
 
+    #[test]
+    fn compute_phash_hex_invalid_image() {
+        assert!(compute_phash_hex(b"not an image").is_none());
+        assert!(compute_phash_hex(&[]).is_none());
+    }
+
     #[tokio::test]
     async fn full_init_unlock_cycle() {
         let dir = tempfile::tempdir().unwrap();
@@ -1530,7 +1550,9 @@ mod tests {
         assert!(!v.is_initialized().await);
         assert!(v.is_locked().await);
 
-        v.init("correct-passphrase").await.expect("init should succeed");
+        v.init("correct-passphrase")
+            .await
+            .expect("init should succeed");
         assert!(v.is_initialized().await);
         assert!(!v.is_locked().await);
 
@@ -1559,7 +1581,9 @@ mod tests {
         let v = VaultState::new(dir.path());
         v.init("test-pass-12345").await.unwrap();
 
-        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1)
+            .await
+            .unwrap();
         record_scan_result(
             &v,
             &scan_id,
@@ -1700,10 +1724,7 @@ mod tests {
 
         // Audit log records both review_accept and review_reject.
         let audit = list_audit(&v, 50).await.unwrap();
-        let actions: Vec<&str> = audit
-            .iter()
-            .filter_map(|r| r["action"].as_str())
-            .collect();
+        let actions: Vec<&str> = audit.iter().filter_map(|r| r["action"].as_str()).collect();
         assert!(actions.contains(&"review_accept"));
         assert!(actions.contains(&"review_reject"));
     }
@@ -1713,7 +1734,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = VaultState::new(dir.path());
         v.init("test-pass-12345").await.unwrap();
-        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1)
+            .await
+            .unwrap();
 
         // Create a profile to attach media to.
         let proposal = Proposal {
@@ -1735,13 +1758,36 @@ mod tests {
         let profile_id = apply_proposal(&v, &proposal).await.unwrap();
 
         let bytes = vec![0x89, 0x50, 0x4e, 0x47, 0xde, 0xad, 0xbe, 0xef];
-        let id1 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone(), None, None)
-            .await
-            .unwrap();
-        let id2 = record_media(&v, &profile_id, None, "https://cdn/a.png", "avatar", "image/png", bytes.clone(), None, None)
-            .await
-            .unwrap();
-        assert_eq!(id1, id2, "duplicate (profile, url, kind) should dedup to same row");
+        let id1 = record_media(
+            &v,
+            &profile_id,
+            None,
+            "https://cdn/a.png",
+            "avatar",
+            "image/png",
+            bytes.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let id2 = record_media(
+            &v,
+            &profile_id,
+            None,
+            "https://cdn/a.png",
+            "avatar",
+            "image/png",
+            bytes.clone(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            id1, id2,
+            "duplicate (profile, url, kind) should dedup to same row"
+        );
 
         let fetched = fetch_media(&v, id1).await.unwrap().expect("present");
         assert_eq!(fetched.0, "image/png");
@@ -1755,7 +1801,18 @@ mod tests {
         assert_eq!(media[0]["kind"], "avatar");
 
         // Empty bytes are rejected.
-        let empty = record_media(&v, &profile_id, None, "https://cdn/empty", "avatar", "image/png", vec![], None, None).await;
+        let empty = record_media(
+            &v,
+            &profile_id,
+            None,
+            "https://cdn/empty",
+            "avatar",
+            "image/png",
+            vec![],
+            None,
+            None,
+        )
+        .await;
         assert!(empty.is_err());
     }
 
@@ -1784,7 +1841,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = VaultState::new(dir.path());
         v.init("test-pass-12345").await.unwrap();
-        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["alice"]"#.into(), 1)
+            .await
+            .unwrap();
 
         // Two profiles, each with an avatar.
         let proposal = |label: &str, site: &str| Proposal {
@@ -1803,8 +1862,12 @@ mod tests {
             rationale: "test".into(),
             score: 1.0,
         };
-        let pid_a = apply_proposal(&v, &proposal("alice", "GitHub")).await.unwrap();
-        let pid_b = apply_proposal(&v, &proposal("bob", "GitHub")).await.unwrap();
+        let pid_a = apply_proposal(&v, &proposal("alice", "GitHub"))
+            .await
+            .unwrap();
+        let pid_b = apply_proposal(&v, &proposal("bob", "GitHub"))
+            .await
+            .unwrap();
 
         // pHash must be stable for the same content.
         let red = red_pixel_png();
@@ -1823,16 +1886,40 @@ mod tests {
         // Store two media rows: alice has the red, bob has the same red (a
         // direct repost). Expect find_similar_by_phash(seed=alice) to
         // surface bob with distance 0.
-        let id_a = record_media(&v, &pid_a, None, "https://cdn/a.png", "avatar", "image/png", red.clone(), Some(red_hash.clone()), None)
-            .await
-            .unwrap();
-        let id_b = record_media(&v, &pid_b, None, "https://cdn/b.png", "avatar", "image/png", red, Some(red_hash.clone()), None)
-            .await
-            .unwrap();
+        let id_a = record_media(
+            &v,
+            &pid_a,
+            None,
+            "https://cdn/a.png",
+            "avatar",
+            "image/png",
+            red.clone(),
+            Some(red_hash.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+        let id_b = record_media(
+            &v,
+            &pid_b,
+            None,
+            "https://cdn/b.png",
+            "avatar",
+            "image/png",
+            red,
+            Some(red_hash.clone()),
+            None,
+        )
+        .await
+        .unwrap();
         assert_ne!(id_a, id_b);
 
         let hits = find_similar_by_phash(&v, id_a, 8).await.unwrap();
-        assert_eq!(hits.len(), 1, "exactly one near-duplicate expected (bob's copy)");
+        assert_eq!(
+            hits.len(),
+            1,
+            "exactly one near-duplicate expected (bob's copy)"
+        );
         assert_eq!(hits[0]["id"].as_i64(), Some(id_b));
         assert_eq!(hits[0]["hamming_distance"].as_u64(), Some(0));
 
@@ -1872,28 +1959,47 @@ mod tests {
         let pid_b = apply_proposal(&v, &prop("bob")).await.unwrap();
 
         let red = red_pixel_png();
-        let red_phash    = compute_phash_hex(&red).expect("phash");
-        let red_compfp   = compute_composite_fingerprint(&red).expect("composite");
+        let red_phash = compute_phash_hex(&red).expect("phash");
+        let red_compfp = compute_composite_fingerprint(&red).expect("composite");
 
         // Composite fingerprint must be strictly more bits than pHash.
         // (256+ vs 64.) That's the whole point.
         assert!(
             red_compfp.len() * 8 > red_phash.len() * 4, // hex chars represent 4 bits
             "composite ({} bits) should be wider than phash ({} bits)",
-            red_compfp.len() * 8, red_phash.len() * 4,
+            red_compfp.len() * 8,
+            red_phash.len() * 4,
         );
 
         // Store the same image against two different profiles, both with
         // pHash + composite. The similarity scan over composite should
         // find them at distance 0 (identical bytes).
         let id_a = record_media(
-            &v, &pid_a, None, "https://x/a.png", "avatar", "image/png",
-            red.clone(), Some(red_phash.clone()), Some(red_compfp.clone()),
-        ).await.unwrap();
+            &v,
+            &pid_a,
+            None,
+            "https://x/a.png",
+            "avatar",
+            "image/png",
+            red.clone(),
+            Some(red_phash.clone()),
+            Some(red_compfp.clone()),
+        )
+        .await
+        .unwrap();
         let id_b = record_media(
-            &v, &pid_b, None, "https://x/b.png", "avatar", "image/png",
-            red, Some(red_phash), Some(red_compfp),
-        ).await.unwrap();
+            &v,
+            &pid_b,
+            None,
+            "https://x/b.png",
+            "avatar",
+            "image/png",
+            red,
+            Some(red_phash),
+            Some(red_compfp),
+        )
+        .await
+        .unwrap();
         assert_ne!(id_a, id_b);
 
         let hits = find_similar_by_composite(&v, id_a, 32).await.unwrap();
@@ -1922,7 +2028,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = VaultState::new(dir.path());
         v.init("test-pass-12345").await.unwrap();
-        let scan_id_setup = record_scan_start(&v, r#"["alice"]"#.into(), 1).await.unwrap();
+        let scan_id_setup = record_scan_start(&v, r#"["alice"]"#.into(), 1)
+            .await
+            .unwrap();
 
         // Create a profile.
         let proposal = Proposal {
@@ -1944,7 +2052,9 @@ mod tests {
         let profile_id = apply_proposal(&v, &proposal).await.unwrap();
 
         // Note round-trip.
-        let updated = update_profile_note(&v, &profile_id, "met at conf").await.unwrap();
+        let updated = update_profile_note(&v, &profile_id, "met at conf")
+            .await
+            .unwrap();
         assert!(updated);
         let detail = get_profile(&v, &profile_id).await.unwrap();
         assert_eq!(detail["note"], "met at conf");
@@ -1954,18 +2064,44 @@ mod tests {
         assert!(!none);
 
         // Custom threshold above the proposal's score must queue, not apply.
-        let scan_id = record_scan_start(&v, r#"["carol"]"#.into(), 1).await.unwrap();
+        let scan_id = record_scan_start(&v, r#"["carol"]"#.into(), 1)
+            .await
+            .unwrap();
         let mut ex = std::collections::HashMap::new();
         ex.insert("bio".to_string(), ExtractedValue::One("c".into()));
         // First time we see "carol" → kind=new_profile, score=1.0.
         // Threshold 0.95 (the max clamp) still applies (1.0 >= 0.95).
-        let out = propose_or_apply(&v, &scan_id, "carol", "X", "https://x/carol", &ex, 80, true, Some(0.95)).await.unwrap();
+        let out = propose_or_apply(
+            &v,
+            &scan_id,
+            "carol",
+            "X",
+            "https://x/carol",
+            &ex,
+            80,
+            true,
+            Some(0.95),
+        )
+        .await
+        .unwrap();
         assert!(matches!(out, ProposalOutcome::Applied { .. }));
 
         // Threshold below clamp floor — should be clamped to 0.50.
         // For a fresh username, new_profile has score 1.0 ≥ 0.50, so still applies.
         // Use an accumulate scenario via username match: same username again → kind=accumulate, score=0.90.
-        let out2 = propose_or_apply(&v, &scan_id, "carol", "Y", "https://y/carol", &ex, 80, true, Some(0.95)).await.unwrap();
+        let out2 = propose_or_apply(
+            &v,
+            &scan_id,
+            "carol",
+            "Y",
+            "https://y/carol",
+            &ex,
+            80,
+            true,
+            Some(0.95),
+        )
+        .await
+        .unwrap();
         // accumulate score = 0.90 < threshold 0.95 ⇒ queued.
         assert!(matches!(out2, ProposalOutcome::Queued { .. }));
     }
