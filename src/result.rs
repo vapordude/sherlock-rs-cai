@@ -81,3 +81,18 @@ pub struct QueryResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_sha256: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_status_as_str() {
+        assert_eq!(QueryStatus::Claimed.as_str(), "claimed");
+        assert_eq!(QueryStatus::Available.as_str(), "available");
+        assert_eq!(QueryStatus::Unknown.as_str(), "unknown");
+        assert_eq!(QueryStatus::Illegal.as_str(), "illegal");
+        assert_eq!(QueryStatus::Waf.as_str(), "waf");
+        assert_eq!(QueryStatus::Tentative.as_str(), "tentative");
+    }
+}
